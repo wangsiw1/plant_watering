@@ -1,5 +1,7 @@
 #include "BluetoothCommon.h"
+#include "Utility.h"
 #include <cstring>
+#include <NimBLEDevice.h>
 
 using namespace BT_TLV;
 
@@ -48,10 +50,17 @@ static bool _parse_tlv_once(const uint8_t* data, size_t len, uint8_t &type, cons
   return true;
 }
 
-bool tlv_extract_mac(const uint8_t* data, size_t len, uint8_t out_mac[6]) {
+void extract_src_mac(const NimBLEAdvertisedDevice* adv, uint8_t src_mac[6]) {
+  // read advertiser address (sender) from the advertisement metadata
+  std::string advAddr = adv->getAddress().toString();
+  uint8_t advMacBuf[6];
+  macFromHexString(advAddr.c_str(), src_mac);
+}
+
+bool tlv_extract_tgt_mac(const uint8_t* data, size_t len, uint8_t tgt_mac[6]) {
   size_t off = 0; uint8_t type,l; const uint8_t* ptr;
   while (_parse_tlv_once(data,len,type,ptr,l,off)) {
-    if (type == TYPE_MAC && l>=6) { memcpy(out_mac, ptr, 6); return true; }
+    if (type == TYPE_MAC && l>=6) { memcpy(tgt_mac, ptr, 6); return true; }
   }
   return false;
 }
@@ -88,19 +97,29 @@ bool tlv_extract_payload(const uint8_t* data, size_t len, const uint8_t** out_pt
   return false;
 }
 
-std::vector<uint8_t> tlv_make_ack(uint16_t nonce) {
+bool tlv_extract_ack(const uint8_t* data, size_t len, uint16_t &nonce) {
+  size_t off = 0; uint8_t type,l; const uint8_t* ptr;
+  while (_parse_tlv_once(data,len,type,ptr,l,off)) {
+    if (type == TYPE_ACK && l>=2) { nonce = (uint16_t(ptr[0])<<8) | uint16_t(ptr[1]); return true; }
+  }
+  return false;
+}
+
+// Build an ACK TLV that includes a MAC (TYPE_MAC) followed by TYPE_ACK (nonce)
+std::vector<uint8_t> tlv_make_ack(const uint8_t tgt_mac[6], uint16_t nonce) {
   std::vector<uint8_t> v;
-  v.push_back(TYPE_ACK);
-  v.push_back(2);
+  v.push_back(TYPE_MAC); v.push_back(6);
+  for (int i=0;i<6;i++) v.push_back(tgt_mac[i]);
+  v.push_back(TYPE_ACK); v.push_back(2);
   v.push_back((uint8_t)(nonce>>8));
   v.push_back((uint8_t)(nonce & 0xFF));
   return v;
 }
 
-std::vector<uint8_t> tlv_make_status(const uint8_t mac[6], uint16_t soil, uint8_t batt) {
+std::vector<uint8_t> tlv_make_status(const uint8_t tgt_mac[6], uint16_t soil, uint8_t batt) {
   std::vector<uint8_t> v;
   v.push_back(TYPE_MAC); v.push_back(6);
-  for (int i=0;i<6;i++) v.push_back(mac[i]);
+  for (int i=0;i<6;i++) v.push_back(tgt_mac[i]);
   v.push_back(TYPE_SOIL); v.push_back(2);
   v.push_back((uint8_t)(soil>>8)); v.push_back((uint8_t)(soil&0xFF));
   v.push_back(TYPE_BATT); v.push_back(1);
@@ -117,4 +136,38 @@ std::vector<uint8_t> tlv_make_command(const uint8_t target_mac[6], uint16_t nonc
   v.push_back(TYPE_PAYLOAD); v.push_back((uint8_t)payload_len);
   for (size_t i=0;i<payload_len;i++) v.push_back(payload[i]);
   return v;
+}
+
+// Shared scan callback implementation and wiring
+namespace BT_TLV {
+  AdvertHandler gAdvertHandler = nullptr;
+  void btCommonSetAdvertHandler(AdvertHandler h) { gAdvertHandler = h; }
+
+  void btCommonBroadcast(const uint8_t* payload, size_t len, unsigned msDelay) {
+    NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+    NimBLEAdvertisementData ad;
+    std::string m((const char*)payload, len);
+    ad.setManufacturerData(m);
+    adv->setAdvertisementData(ad);
+    adv->start();
+    delay(msDelay);
+    adv->stop();
+  }
+
+  class CommonScanCb : public NimBLEScanCallbacks {
+    void onResult(const NimBLEAdvertisedDevice* adv) override {
+      if (!gAdvertHandler) return;
+      std::string m = adv->getManufacturerData();
+      if (!m.empty()) { gAdvertHandler((const uint8_t*)m.data(), m.size(), adv); return; }
+      std::string s = adv->getServiceData(); 
+      if (!s.empty()) { gAdvertHandler((const uint8_t*)s.data(), s.size(), adv); }
+    }
+  };
+
+  // helper to attach common scan cb to the global scanner
+  void btCommonInstallScanCallbacks() {
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    scan->setScanCallbacks(new CommonScanCb());
+  }
+
 }
