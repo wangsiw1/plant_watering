@@ -7,6 +7,8 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "Utility.h"
+#include "config.h"
+#include "WateringManager.h"
 
 using namespace BT_TLV;
 
@@ -15,6 +17,15 @@ static WorkerNode nodes[MAX_WORKER_COUNT];
 static int nodeCount = 0;
 
 static void updateNode(const uint8_t mac[6], uint16_t soil, uint8_t batt) {
+  // Check if node is added
+  bool worker_added = false;
+  for (int i=0;i<workerListCount;i++) {
+    if (memcmp(workerList[i].mac, mac, 6)==0) {
+      worker_added = true;
+      break;
+    }
+  }
+  if (!worker_added) return;
   for (int i=0;i<nodeCount;i++) {
     if (memcmp(nodes[i].mac, mac, 6)==0) {
       nodes[i].soil = soil; nodes[i].battery = batt; nodes[i].lastSeen = millis()/1000; return;
@@ -38,22 +49,44 @@ static void markAck(uint16_t nonce) { for (int i=0;i<MAX_PENDING;i++) if (pendin
 
 static void parseAdvert(const uint8_t* data, size_t len, const NimBLEAdvertisedDevice* adv) {
   if (!data) return;
+  uint8_t srcMac[6];
+  extract_src_mac(adv, srcMac);
 
   // If this advert is an ACK from a worker, mark pending command as acknowledged
   uint16_t ackNonce;
-  if (tlv_extract_ack(data,len,ackNonce)) { markAck(ackNonce); return; }
+  if (tlv_extract_ack(data,len,ackNonce)) { markAck(ackNonce); onCommandAcked(srcMac, ackNonce); return; }
 
   // Otherwise treat as worker status update (TYPE_MAC in TLV is target MAC on commands; the advertiser address
   // identifies the sender). Extract worker-reported fields and update node list.
-  uint8_t srcMac[6]; uint8_t tgtMac[6]; uint16_t soil; uint8_t batt;
-  extract_src_mac(adv, srcMac);
-  if (tlv_extract_tgt_mac(data,len,tgtMac) && memcmp(tgtMac, thisMac, 6)==0) {
-    if (!tlv_extract_soil(data,len,soil)) soil = 0;
-    if (!tlv_extract_batt(data,len,batt)) batt = 0;
-    updateNode(srcMac, soil, batt);
+  uint8_t tgtMac[6]; 
+  if (tlv_extract_tgt_mac(data,len,tgtMac) && (memcmp(tgtMac, thisMac, 6)==0 || memcmp(tgtMac, BROADCAST_MAC, 6)==0)) {
+    uint16_t soil; uint8_t batt;
+    if (tlv_extract_soil(data,len,soil) && tlv_extract_batt(data,len,batt)) {
+      updateNode(srcMac, soil, batt);
+
+      if (autoEnabled && memcmp(tgtMac, BROADCAST_MAC, 6)==0) {
+        unsigned long now_s = millis() / 1000;
+        uint32_t sleepSec = calculateSleepSec(now_s);
+
+        uint8_t payload[1 + 4];
+        payload[0] = 0x02; // CMD_SLEEP
+        // encode big-endian uint32 seconds
+        payload[1] = (uint8_t)((sleepSec >> 24) & 0xFF);
+        payload[2] = (uint8_t)((sleepSec >> 16) & 0xFF);
+        payload[3] = (uint8_t)((sleepSec >> 8) & 0xFF);
+        payload[4] = (uint8_t)(sleepSec & 0xFF);
+        btMainQueueCommand(srcMac, payload, sizeof(payload), 2, 700);
+        return;
+      }
+    }
+    // If advertiser sent a payload and it's a water command, treat as watering completion
+    const uint8_t* payload; size_t len;
+    if (tlv_extract_payload(data,len,&payload,len) && len>0 && payload[0]==BT_CMD::CMD_WATER) {
+      onWorkerCompleted(srcMac);
+    }
     // send a scoped ACK back to the advertiser to confirm receipt (nonce=0)
-    // auto ack = tlv_make_ack((const uint8_t*)tgtMac, 0);
-    // BT_TLV::btCommonBroadcast(ack.data(), ack.size(), 100);
+    auto ack = tlv_make_ack((const uint8_t*)tgtMac, 0);
+    BT_TLV::btCommonBroadcast(ack.data(), ack.size(), 100);
   }
 }
 
@@ -73,6 +106,8 @@ static void btMainSenderTask(void* pv) {
       int slot=-1; for (int i=0;i<MAX_PENDING;i++) if (!pending[i].inUse) { slot=i; break; }
       if (slot<0) continue; // drop if no pending slot
       pending[slot].inUse = true; pending[slot].acked = false; pending[slot].nonce = nonce;
+      // notify watering manager of the actual nonce used for this sent command
+      if (item.payload[0] == 0x03) onCommandSent(item.mac, nonce);
       for (int attempt=0; attempt<=item.retries; ++attempt) {
         BT_TLV::btCommonBroadcast(cmd.data(), cmd.size(), 100);
         unsigned long start = millis();
@@ -114,13 +149,6 @@ bool btMainQueueCommand(const uint8_t target_mac[6], const uint8_t* payload, siz
   memcpy(it.payload, payload, len);
   it.len = len; it.retries = retries; it.timeoutMs = timeoutMs;
   if (xQueueSend(cmdQueue, &it, 0) == pdTRUE) {
-    // if this is a water command (CMD_WATER = 0x03), update corresponding node lastWater epoch
-    if (len>0 && payload[0]==0x03) {
-      unsigned long epochNow = millis()/1000;
-      for (int i=0;i<nodeCount;i++) {
-        if (memcmp(nodes[i].mac, target_mac, 6)==0) { nodes[i].lastWater = epochNow; break; }
-      }
-    }
     return true; // queued
   }
   return false; // queue full
@@ -133,4 +161,10 @@ const WorkerNode* btMainNodeAt(int idx) { if (idx<0||idx>=nodeCount) return null
 const WorkerNode* btMainFindNodeByMac(const uint8_t mac[6]) {
   for (int i=0;i<nodeCount;i++) if (memcmp(nodes[i].mac, mac, 6)==0) return &nodes[i];
   return nullptr;
+}
+
+void btMainSetNodeLastWater(const uint8_t mac[6], unsigned long epochSeconds) {
+  for (int i=0;i<nodeCount;i++) {
+    if (memcmp(nodes[i].mac, mac, 6)==0) { nodes[i].lastWater = epochSeconds; break; }
+  }
 }

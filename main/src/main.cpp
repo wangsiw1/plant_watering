@@ -10,6 +10,7 @@
 #include "WebUI.h"
 #include "BluetoothMain.h"
 #include "Utility.h"
+#include "WateringManager.h"
 
 extern "C" {
 	void vApplicationIdleHook();
@@ -77,13 +78,6 @@ void TaskWatering(void *pvParameters) {
 			continue;
 		}
 
-		// TODO: change tank level to digital high/low
-		int tank = readTankLevel();
-		if (tank < 500) {
-			vTaskDelay(pdMS_TO_TICKS(500));
-			continue;
-		}
-
 		// evaluate worker soils and collect targets
 		const uint16_t DEFAULT_THRESHOLD = 2000;
 		const uint16_t DEFAULT_DURATION = 5; // seconds per valve
@@ -104,36 +98,16 @@ void TaskWatering(void *pvParameters) {
 
 		// Start pump and instruct workers
 		pumpOn();
-		uint16_t maxDur = 0;
-		for (auto w : toWater) {
-			int tank = readTankLevel();
-			if (tank < 500) {
-				break;
-			}
-			uint16_t dur = w->duration;
-			uint8_t payload[3];
-			payload[0] = 0x03; // CMD_WATER
-			payload[1] = (uint8_t)(dur >> 8);
-			payload[2] = (uint8_t)(dur & 0xFF);
-			btMainQueueCommand(w->mac, payload, sizeof(payload), 2, 700);
-			vTaskDelay(pdMS_TO_TICKS((dur + 1) * 1000));
-		}
+		startWatering(toWater);
 		pumpOff();
 
 		lastWateringEnd = millis() / 1000;
 
-		// Calculate sleep duration until next data sync and instruct workers to sleep
-		// Aim for workers to wake around next data sync plus a small skew (5s).
-		unsigned long sinceLastSync = (now_s > lastDataSync) ? (now_s - lastDataSync) : 0;
-		// desired delay from now until next sync moment
-		long desired = (long)settings.dataSyncInterval + 5 - (long)sinceLastSync;
-		if (desired < 60) desired = 60; // enforce minimum sleep
-		if (desired > (long)settings.dataSyncInterval) desired = settings.dataSyncInterval; // cap to configured max
-		uint32_t sleepSec = (uint32_t)desired;
+		uint32_t sleepSec = calculateSleepSec(now_s);
 		for (int wi = 0; wi < workerListCount; ++wi) {
 			const WorkerConfig &wc = workerList[wi];
 			uint8_t payload[1 + 4];
-			payload[0] = 0x02; // CMD_SYNC
+			payload[0] = 0x02; // CMD_SLEEP
 			// encode big-endian uint32 seconds
 			payload[1] = (uint8_t)((sleepSec >> 24) & 0xFF);
 			payload[2] = (uint8_t)((sleepSec >> 16) & 0xFF);

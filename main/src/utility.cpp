@@ -49,3 +49,16 @@ uint32_t getCurrentTimeOfDaySec() {
   uint32_t addSec = (uint32_t)(delta / 1000UL);
   return (settings.savedTimeOfDaySec + addSec) % 86400u;
 }
+
+uint32_t calculateSleepSec(unsigned long now_s) {
+  // Calculate sleep duration until next data sync and instruct workers to sleep
+  // Aim for workers to wake around next data sync plus a small skew (5s).
+  unsigned long sinceLastSync = (now_s > lastDataSync) ? (now_s - lastDataSync) : 0;
+  // desired delay from now until next sync moment
+  long desired = (long)settings.dataSyncInterval + 5 - (long)sinceLastSync;
+  if (desired < 60) desired = 60; // enforce minimum sleep
+  if (desired > (long)settings.dataSyncInterval) desired = settings.dataSyncInterval; // cap to configured max
+  uint32_t sleepSec = (uint32_t)desired;
+
+  return sleepSec;
+}

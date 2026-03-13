@@ -16,3 +16,6 @@ bool btMainQueueCommand(const uint8_t target_mac[6], const uint8_t* payload, siz
 int btMainNodeCount();
 const WorkerNode* btMainNodeAt(int idx);
 const WorkerNode* btMainFindNodeByMac(const uint8_t mac[6]);
+
+// Update lastWater epoch for a discovered node (seconds since epoch)
+void btMainSetNodeLastWater(const uint8_t mac[6], unsigned long epochSeconds);

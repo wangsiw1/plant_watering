@@ -10,3 +10,4 @@ bool macFromHexString(const String &macHex, uint8_t out[6]);
 // current time of day computed using millis() and saved reference.
 void setUserTimeOfDaySec(uint32_t secOfDay);
 uint32_t getCurrentTimeOfDaySec();
+uint32_t calculateSleepSec(unsigned long now_s);

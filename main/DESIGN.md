@@ -133,7 +133,8 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
       - Listen to any new worker broadcasting to join
       - Maintain time
     - Worker node
-      - Always on by deafult, broadcasting data periodically. After connecting to main node, receive sleep time and go to sleep, only wake up after and wait for main node probe to broadcast data
+      - Always on by deafult, broadcasting data periodically with target node Bluetooth MAC FF:FF:FF:FF:FF:FF. 
+      - After connecting to main node, receive sleep time and go to sleep, only wake up after and wait for main node probe to broadcast data
       - Monitor soil moisture sensor
     - Worker node connection procedure
       - Not exactly connection, but as long as main node is able to communicate with worker, mark it as connected
@@ -143,6 +144,9 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
       - Main node calculates next data sync time
       - With calculated delay time for each worker node, all worker should wake up around similar time
       - After watering procedure done, main node should calculate new time and send to workers, then workers go to sleep
+        1. Main node broadcasts sleep time to the worker one by one
+        2. Worker broadcasts ACK
+        3. Worker go to sleep
     - Data sync procedure
       - After data sync interval plus extra small delay, assuming all worker nodes wake up, for each worker in the worker list:
         1. Main node broadcasts probe to the worker
@@ -154,7 +158,7 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
         2. For each node that soil moisture goes below the threshold:
           2.1 Main node broadcasts watering duration to worker
           2.2 Worker broadcasts ACK and activates valve
-          2.3 Worker stops valve after duration and broadcasts completion
+          2.3 Worker stops valve after duration and broadcasts back same watering command
           2.4 Main node broadcasts ACK
         3. Main node stops pump and proceeds to device timing coordination procedure
       - If conditions not meet, skip to device timing coordination procedure
@@ -223,7 +227,7 @@ Defined types (used in code)
 
 Command IDs (embedded in payload)
 - `CMD_PROBE = 0x01` — ask worker to broadcast status immediately
-- `CMD_SYNC  = 0x02` — set next wake/sync time (payload encodes delay)
+- `CMD_SLEEP  = 0x02` — set next wake/sync time (payload encodes delay)
 - `CMD_WATER = 0x03` — instruct worker to open valve for a duration
 
 Example: Probe (main -> worker)

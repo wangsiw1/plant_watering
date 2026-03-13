@@ -30,7 +30,7 @@ namespace BT_TLV {
 // Command IDs for TYPE_CMD (1-byte payload when present)
 namespace BT_CMD {
   constexpr uint8_t CMD_PROBE = 0x01; // ask worker to broadcast status immediately
-  constexpr uint8_t CMD_SYNC  = 0x02; // set next sync/wake time or delay
+  constexpr uint8_t CMD_SLEEP = 0x02; // set next sync/wake time or delay
   constexpr uint8_t CMD_WATER = 0x03; // instruct worker to open valve
 }
 
@@ -61,6 +61,8 @@ namespace BT_CMD {
    The main marks the command acknowledged on receipt of matching nonce.
 
 */
+
+const uint8_t BROADCAST_MAC[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 void extract_src_mac(const NimBLEAdvertisedDevice* adv, uint8_t out_mac[6]);
 // Helpers for parsing TLV blobs (non-owning). Return true if field found.
