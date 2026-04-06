@@ -9,6 +9,10 @@ void sensorBegin() {
   gTankLevel = analogRead(TANK_PIN);
 }
 
-int readTankLevel() {
+void readTankLevel() {
+  gTankLevel = analogRead(TANK_PIN);
+}
+
+int getTankLevel() {
   return gTankLevel;
 }

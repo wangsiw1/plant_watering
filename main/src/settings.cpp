@@ -1,16 +1,19 @@
 #include "Config.h"
 #include "Utility.h"
+#include "BluetoothMain.h"
+#include <WiFi.h>
 #include <Preferences.h>
 
 static Preferences prefs;
 
 Settings settings;
-volatile unsigned long autoEnabled = false;
+volatile bool autoEnabled = false;
 volatile unsigned long lastWateringEnd = 0;
 volatile unsigned long lastDataSync = 0;
 
 WorkerConfig workerList[MAX_WORKER_COUNT];
 int workerListCount = 0;
+State state = READY;
 
 static const uint32_t WATER_INTERVAL_MIN = 60;
 static const uint32_t WATER_INTERVAL_MAX = 2419200;
@@ -73,6 +76,49 @@ void loadSettings() {
   }
 }
 
+// Function to connect to Wi-Fi using stored credentials
+bool connectToWiFi() {
+  prefs.begin("plant", true);
+  String savedSSID = prefs.getString("ssid", "");
+  String savedPassword = prefs.getString("password", "");
+
+  if (savedSSID.isEmpty()) {
+    LOG("No saved Wi-Fi credentials found.");
+    return false;
+  }
+
+  LOG("Connecting to saved Wi-Fi: %s", savedSSID.c_str());
+  if (savedPassword.isEmpty()) {
+    WiFi.begin(savedSSID.c_str());
+  } else {
+    WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
+  }
+
+  unsigned long startTime = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - startTime > 10000) {
+      LOG("Failed to connect to saved Wi-Fi.");
+      return false;
+    }
+    delay(500);
+  }
+
+  LOG("Successfully connected to %s", savedSSID.c_str());
+  return true;
+}
+
+void saveWifiCred(const char *ssid, const char *password) {
+  LOG("Provisioning successful! SSID: %s", ssid);
+  prefs.begin("plant", false);
+  // Store the credentials and API key in preferences
+  prefs.putString("ssid", String(ssid));
+  if (password) {
+    prefs.putString("password", String(password));
+  }
+  
+  LOG("Credentials saved.");
+}
+
 bool addWorkerByHex(const String &macHex, uint16_t threshold, uint16_t duration, const String &name) {
   if (workerListCount >= MAX_WORKER_COUNT) return false;
   uint8_t mac[6];
@@ -87,6 +133,8 @@ bool addWorkerByHex(const String &macHex, uint16_t threshold, uint16_t duration,
     workerList[workerListCount].name[sizeof(workerList[workerListCount].name)-1] = '\0';
   } else workerList[workerListCount].name[0] = '\0';
   workerListCount++;
+  // ensure a placeholder exists in discovery cache so updates can be applied
+  btMainEnsureNodeExists(mac);
   saveSettings();
   return true;
 }
@@ -99,6 +147,8 @@ bool removeWorkerByHex(const String &macHex) {
       // shift
       for (int j=i;j<workerListCount-1;j++) workerList[j]=workerList[j+1];
       workerListCount--;
+      // remove any discovery-cache entry for this MAC
+      btMainRemoveNodeByMac(mac);
       saveSettings();
       return true;
     }
@@ -123,4 +173,14 @@ bool updateWorkerByHex(const String &macHex, uint16_t threshold, uint16_t durati
     }
   }
   return false;
+}
+
+// Function to clear saved WiFi credentials
+bool clearWifiCredentials() {
+  prefs.begin("plant", false);
+  prefs.remove("ssid");
+  prefs.remove("password");
+  
+  LOG("WiFi credentials cleared.");
+  return true;
 }

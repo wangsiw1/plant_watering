@@ -1,5 +1,7 @@
 #pragma once
 #include <Arduino.h>
+#include "Utility.h"
 
 void sensorBegin();
-int readSoilMoisture();
+void readSoilMoisture();
+uint16_t getSoilMoisture();

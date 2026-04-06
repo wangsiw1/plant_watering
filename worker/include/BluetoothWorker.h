@@ -4,7 +4,9 @@
 
 extern uint8_t mainMac[6];
 
-extern bool mainMacIsSet();
+bool mainMacIsSet();
+void mainMacReset();
+bool btLastCommOverdue();
 void btWorkerBegin();
 // Worker advertises its status (soil 0-4095, battery 0-100)
 void btWorkerAdvertiseStatus(uint16_t soil, uint8_t batt);

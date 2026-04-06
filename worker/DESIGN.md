@@ -13,6 +13,7 @@ Goal: As a worker device, it will have a capacitive soil moisture sensor and a s
 - Hardware
   - ESP32 C3 Super Mini
   - Valve activation pin: GPIO 1
+  - Battery pin: GPIO 4
   - Soil moisture sensor reading pin: GPIO 3
 
 - Logics
@@ -37,7 +38,7 @@ Goal: As a worker device, it will have a capacitive soil moisture sensor and a s
   - Workflow
     - Worker node
       - Always on by deafult, broadcasting data periodically with target node Bluetooth MAC FF:FF:FF:FF:FF:FF. 
-      - After connecting to main node, receive sleep time and go to sleep, only wake up after and wait for main node probe to broadcast data
+      - After syncing with main node, receive sleep time and go to sleep, only wake up after and wait for main node probe to broadcast data
       - Monitor soil moisture sensor
     - Worker node connection procedure
       - Not exactly connection, but as long as main node is able to communicate with worker, mark it as connected
@@ -61,7 +62,7 @@ Goal: As a worker device, it will have a capacitive soil moisture sensor and a s
         2. For each node that soil moisture goes below the threshold:
           2.1 Main node broadcasts watering duration to worker
           2.2 Worker broadcasts ACK and activates valve
-          2.3 Worker stops valve after duration and broadcasts completion
+          2.3 Worker stops valve after duration and broadcasts back same watering command
           2.4 Main node broadcasts ACK
         3. Main node stops pump and proceeds to device timing coordination procedure
       - If conditions not meet, skip to device timing coordination procedure
@@ -94,9 +95,12 @@ Defined types (used in code)
 - `0x02` TYPE_SOIL : 2 bytes — soil ADC (uint16)
 - `0x03` TYPE_BATT : 1 byte  — battery percent
 - `0x11` TYPE_NONCE: 2 bytes — nonce for request/ACK correlation (uint16)
-- `0x12` TYPE_TARGET: 6 bytes — target MAC for commands
-- `0x14` TYPE_PAYLOAD: n bytes — command-specific payload
-- `0x20` TYPE_ACK  : 2 bytes — ACK TLV carrying a nonce
+ - `0x12` TYPE_TARGET: REMOVED; target MAC is carried using `0x01` TYPE_MAC
+ - Command TLV types (embedded in the command body):
+   - `0x30` TYPE_CMD_PROBE: probe request (len=0)
+   - `0x31` TYPE_CMD_SYNC: sleep/sync request (len=4 — seconds)
+   - `0x32` TYPE_CMD_WATER: water request (len=2 — duration seconds)
+ - `0x20` TYPE_ACK  : 2 bytes — ACK TLV carrying a nonce
 
 Command IDs (embedded in payload)
 - `CMD_PROBE = 0x01` — ask worker to broadcast status immediately
@@ -105,15 +109,15 @@ Command IDs (embedded in payload)
 
 Example: Probe (main -> worker)
 - CompanyID(2)
-- TYPE_TARGET(1) LEN(1) MAC(6)
+- TYPE_MAC(1) LEN(1) MAC(6)  # target MAC carried using TYPE_MAC
 - TYPE_NONCE(1) LEN(1) NONCE(2)
-- TYPE_PAYLOAD(1) LEN(1) [CMD_PROBE]
+ - TYPE_CMD_PROBE(1) LEN(1=0)  # TLV field with type 0x30 and length 0
 
 Example: Water 10 seconds (main -> worker)
 - CompanyID(2)
-- TYPE_TARGET LEN MAC
+- TYPE_MAC LEN MAC  # target MAC carried using TYPE_MAC
 - TYPE_NONCE LEN NONCE
-- TYPE_PAYLOAD LEN [CMD_WATER (1) | duration (2 bytes big-endian)]
+ - TYPE_CMD_WATER LEN [duration (2 bytes big-endian)]
 
 Worker responses
 - On command targeted to the worker, it should immediately advertise an ACK TLV:

@@ -2,6 +2,13 @@
 #include <Arduino.h>
 #include "Utility.h"
 
+typedef enum {
+  READY, 
+  SYNCING,
+  WATERING,
+  SLEEPING
+} State;
+
 struct Settings {
   String name;
   uint32_t waterInterval;
@@ -27,6 +34,7 @@ struct WorkerConfig {
 
 extern WorkerConfig workerList[MAX_WORKER_COUNT];
 extern int workerListCount;
+extern State state;
 
 // Worker list management
 bool addWorkerByHex(const String &macHex, uint16_t threshold, uint16_t duration, const String &name = String());
@@ -34,9 +42,12 @@ bool removeWorkerByHex(const String &macHex);
 bool updateWorkerByHex(const String &macHex, uint16_t threshold, uint16_t duration, const String &name = String());
 
 extern Settings settings;
-extern volatile unsigned long autoEnabled;
+extern volatile bool autoEnabled;
 extern volatile unsigned long lastWateringEnd;
 extern volatile unsigned long lastDataSync;
 
 void saveSettings();
 void loadSettings();
+bool connectToWiFi();
+void saveWifiCred(const char *ssid, const char *password);
+bool clearWifiCredentials();

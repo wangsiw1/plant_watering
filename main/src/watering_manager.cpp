@@ -11,16 +11,16 @@ const uint8_t zeroMac[6] = {0,0,0,0,0,0};
 
 void startWatering(const std::vector<const WorkerConfig*>& toWater) {
   for (auto w : toWater) {
-    int tank = readTankLevel();
+    int tank = getTankLevel();
     if (tank < 500) {
       break;
     }
 
     uint16_t dur = w->duration;
-    uint8_t payload[3];
-    payload[0] = 0x03; // CMD_WATER
-    payload[1] = (uint8_t)(dur >> 8);
-    payload[2] = (uint8_t)(dur & 0xFF);
+    uint8_t payload[4];
+    payload[0] = BT_TLV::TYPE_CMD_WATER; payload[1] = 2; // TLV: type + len
+    payload[2] = (uint8_t)(dur >> 8);
+    payload[3] = (uint8_t)(dur & 0xFF);
     btMainQueueCommand(w->mac, payload, sizeof(payload), 2, 700);
 
     currentNonce = 0;
@@ -32,7 +32,7 @@ void startWatering(const std::vector<const WorkerConfig*>& toWater) {
       ((millis()/1000)-now_s) <= (dur+1) || 
       memcmp(currentMac, zeroMac, 6) == 0
     ) {
-      int tank = readTankLevel();
+      tank = getTankLevel();
       if (tank < 500) {
         break;
       }

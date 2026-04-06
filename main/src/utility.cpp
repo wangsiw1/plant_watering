@@ -2,14 +2,14 @@
 #include "config.h"
 
 
-static String macWifiLast6() {
+static String getMacAddr(esp_mac_type_t device) {
 	uint8_t mac[6];
-	esp_read_mac(mac, ESP_MAC_WIFI_STA);
+	esp_read_mac(mac, device);
 	char buf[13];
 	sprintf(buf, "%02X%02X%02X%02X%02X%02X", mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
 	String s(buf);
 	s.toLowerCase();
-	return s.substring(6);
+	return s;
 }
 
 bool macFromHexString(const String &macHex, uint8_t out[6]) {
@@ -31,7 +31,13 @@ bool macFromHexString(const String &macHex, uint8_t out[6]) {
 
 const String& getWifiMacLast6()
 {
-    static String value = macWifiLast6();
+    static String value = getMacAddr(ESP_MAC_WIFI_STA).substring(6);
+    return value;
+}
+
+const String& getBtMac()
+{
+    static String value = getMacAddr(ESP_MAC_BT);
     return value;
 }
 

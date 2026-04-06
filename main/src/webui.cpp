@@ -16,7 +16,7 @@
 static WebServer server(80);
 
 static String makeStatusJson() {
-  int tank = readTankLevel();
+  int tank = getTankLevel();
   unsigned long now = millis()/1000;
   uint32_t tod = getCurrentTimeOfDaySec();
   JsonDocument doc;
@@ -69,7 +69,7 @@ void handleRoot() {
       body{font-family:Arial,Helvetica,sans-serif;margin:8px}
       div{margin-top:6px}
       label{margin-top:6px;display:block;}
-      button{padding:6px 10px;margin-left:6px}
+      button{padding:6px 10px;margin-top:6px; margin-left:6px}
       table{border-collapse:collapse;width:100%}
       th,td{border:1px solid #ddd;padding:6px;text-align:left}
     </style>
@@ -78,7 +78,10 @@ void handleRoot() {
     <h2 id="title">Plant Watering</h2>
     <div>Current time (HH:MM): <span id="time">-</span></div>
     <div>Tank level: <span id="tank">-</span></div>
-    <div>Last watering end (epoch s): <span id="last">-</span></div>
+    <div>Status: <span id="status">-</span></div>
+    <div>Status: <span id="auto">-</span></div>
+    <div>Status: <span id="wint">-</span></div>
+    <div>Previous auto watering(epoch s): <span id="last">-</span></div>
     <div>
       <button onclick="togglePump()">Toggle Pump 5s</button>
     </div>
@@ -91,23 +94,27 @@ void handleRoot() {
       <label>Current time (HH:MM): <input id="newTime" type="time"></label>
     </div>
     <div>
-      <label>Water interval (s): <input id="wint" type="number" min="60" max="2419200"></label>
+      <label>Water interval (s): <input id="newWint" type="number" placeholder="60-2419200(28 days)" min="60" max="2419200"></label>
     </div>
     <div>
-      <label>Auto: <input id="auto" type="checkbox"></label>
+      <label>Auto: <input id="newAudo" type="checkbox"></label>
     </div>
     <div>
       <button id="applySettingsBtn" onclick="applySettings()">Apply Settings</button>
       <span id="settingsStatus" style="margin-left:8px"></span>
+    </div>
+    <div>
+      <button id="clearWifiBtn" onclick="clearWifiCredConfirm()">Clear WiFi Credentials</button>
+      <span id="wifiStatus" style="margin-left:8px"></span>
     </div>
 
     <h3 style="margin-top:14px">Workers</h3>
     <div>
       <form id="addForm" onsubmit="return false;">
           <label>MAC (hex): <input id="wmac" placeholder="AABBCCDDEEFF"></label>
-          <label>Name: <input id="wname" maxlength="31" placeholder="Worker name" style="width:140px"></label>
-          <label>Threshold: <input id="wth" type="number" value="2000" min="0" max="4095" style="width:90px"></label>
-          <label>Duration(s): <input id="wdur" type="number" value="5" min="1" max="600" style="width:80px"></label>
+          <label>Name: <input id="wname" maxlength="31" placeholder="Worker name(31 characters max)" style="width:140px"></label>
+          <label>Threshold: <input id="wth" type="number" placeholder="0-4095" min="0" max="4095" style="width:90px"></label>
+          <label>Duration (s): <input id="wdur" type="number" placeholder="1-60" min="1" max="60" style="width:80px"></label>
         <button onclick="addWorker()">Add Worker</button>
       </form>
     </div>
@@ -210,18 +217,18 @@ void handleRoot() {
         div.style.padding = '6px 0';
         div.innerHTML = `
           <hr>
-          <div><strong>${w.mac}</strong></div>
+          <div><strong>${i+1}. ${w.mac}</strong></div>
           <div>
             <label>Name: <input class="iname" value="${escapeHtml(w.name||'')}" maxlength="31" style="width:160px"></label>
             <label style="margin-left:8px">Threshold: <input class="ith" type="number" value="${w.threshold}" min="0" max="4095" style="width:90px"></label>
-            <label style="margin-left:8px">Duration(s): <input class="idur" type="number" value="${w.duration}" min="1" max="600" style="width:80px"></label>
+            <label style="margin-left:8px">Duration(s): <input class="idur" type="number" value="${w.duration}" min="1" max="60" style="width:80px"></label>
           </div>
           <div>
             <button class="applyBtn" disabled>Apply</button>
             <button class="removeBtn">Remove</button>
             <button class="waterBtn">Water</button>
             <span class="status" style="margin-left:8px"></span>
-              <span style="margin-left:8px;color:#666">Soil: ${w.soil===null?'-':w.soil} Battery: ${w.battery===null?'-':w.battery} LastSeen: ${fmtTime(w.lastSeen)} LastWater: ${fmtTime(w.lastWater)}</span>
+              <span style="margin-left:8px;color:#666">Soil: ${w.soil===null?'-':w.soil} Battery: ${w.battery===null?'-':w.battery} LastSync: ${fmtTime(w.lastSync)} LastWater: ${fmtTime(w.lastWater)}</span>
           </div>
         `;
         // attach events
@@ -287,7 +294,7 @@ void handleRoot() {
       const btn = document.getElementById('applySettingsBtn');
       const status = document.getElementById('settingsStatus');
       const timeVal = (document.getElementById('newTime').value || '').trim();
-      const body = {name:document.getElementById('name').value, auto:document.getElementById('auto').checked, wint:parseInt(document.getElementById('wint').value)};
+      const body = {name:document.getElementById('name').value, auto:document.getElementById('newAuto').checked, wint:parseInt(document.getElementById('newWint').value)};
       if (timeVal) body.newTime = timeVal;
       try {
         btn.disabled = true;
@@ -298,6 +305,28 @@ void handleRoot() {
         setTimeout(fetchStatus,300);
       } catch (e) {
         status.innerText = 'Save failed'; status.style.color = 'crimson';
+      } finally {
+        btn.disabled = false;
+        setTimeout(()=>{ status.innerText = ''; }, 3000);
+      }
+    }
+
+    async function clearWifiCredConfirm() {
+      const confirmed = confirm("Are you sure you want to clear saved WiFi credentials? This action cannot be undone.");
+      if (!confirmed) return;
+      
+      const btn = document.getElementById('clearWifiBtn');
+      const status = document.getElementById('wifiStatus');
+      btn.disabled = true;
+      status.innerText = 'Clearing...'; status.style.color = 'gray';
+      
+      try {
+        const res = await fetch('/wifi/clear', {method:'POST'});
+        if (!res.ok) throw new Error(await res.text());
+        status.innerText = 'Cleared'; status.style.color = 'green';
+        setTimeout(fetchStatus, 300);
+      } catch (e) {
+        status.innerText = 'Clear failed'; status.style.color = 'crimson';
       } finally {
         btn.disabled = false;
         setTimeout(()=>{ status.innerText = ''; }, 3000);
@@ -335,7 +364,7 @@ void handleRoot() {
         const s = String(hh).padStart(2,'0')+':' + String(mm).padStart(2,'0');
         document.getElementById('time').value = s;
       }
-      document.getElementById('auto').checked = j.auto || false;
+      document.getElementById('auto').value = j.auto ? "On" : "Off";
       document.getElementById('wint').value = j.waterInterval || 3600;
       document.getElementById('title').innerText = 'Plant Watering ' + (j.name?('(' + j.name + ')'):"");
       renderDiagnostics(j);
@@ -358,7 +387,7 @@ void handleStatus() {
 
 void handlePumpToggle() {
   pumpOn();
-  delay(5000);
+  vTaskDelay(pdMS_TO_TICKS(5000));
   pumpOff();
   server.send(200, "text/plain", "OK");
 }
@@ -390,6 +419,12 @@ void handleSettings() {
   server.send(200, "text/plain", "OK");
 }
 
+void handleClearWifiCred() {
+  if (server.method() != HTTP_POST) { server.send(405); return; }
+  bool ok = clearWifiCredentials();
+  server.send(ok?200:400, "text/plain", ok?"OK":"ERR");
+}
+
 void handleNodes() {
   // Return configured workers list with latest discovered readings when available
   JsonDocument doc;
@@ -407,12 +442,12 @@ void handleNodes() {
     if (n) {
       o["soil"] = n->soil;
       o["battery"] = n->battery;
-      o["lastSeen"] = n->lastSeen;
+      o["lastSync"] = n->lastSync;
       o["lastWater"] = n->lastWater;
     } else {
       o["soil"] = nullptr;
       o["battery"] = nullptr;
-      o["lastSeen"] = nullptr;
+      o["lastSync"] = nullptr;
       o["lastWater"] = nullptr;
     }
   }
@@ -432,7 +467,7 @@ void handleWorkerAdd() {
     if (!err) {
       mac = String((const char*)(doc["mac"] | ""));
       th = (uint16_t)constrain((uint32_t)(doc["threshold"] | 2000), 0, 4095);
-      dur = (uint16_t)constrain((uint32_t)(doc["duration"] | 5), 1, 600);
+      dur = (uint16_t)constrain((uint32_t)(doc["duration"] | 5), 1, 60);
       if (doc["name"].is<const char*>()) name = String((const char*)doc["name"]);
     }
   }
@@ -463,7 +498,7 @@ void handleWorkerUpdate() {
     if (!err) {
       mac = String((const char*)(doc["mac"] | ""));
       th = (uint16_t)constrain((uint32_t)(doc["threshold"] | 2000), 0, 4095);
-      dur = (uint16_t)constrain((uint32_t)(doc["duration"] | 5), 1, 600);
+      dur = (uint16_t)constrain((uint32_t)(doc["duration"] | 5), 1, 60);
       if (doc["name"].is<const char*>()) name = String((const char*)doc["name"]);
     }
   }
@@ -494,7 +529,9 @@ void handleWorkerWater() {
     }
     if (!found) { server.send(400, "text/plain", "NO_DURATION"); return; }
   }
-  uint8_t payload[3]; payload[0] = 0x03; payload[1] = (uint8_t)(dur>>8); payload[2] = (uint8_t)(dur & 0xFF);
+  uint8_t payload[4];
+  payload[0] = BT_TLV::TYPE_CMD_WATER; payload[1] = 2; // TLV: type + len
+  payload[2] = (uint8_t)(dur>>8); payload[3] = (uint8_t)(dur & 0xFF);
   bool queued = btMainQueueCommand(macb, payload, sizeof(payload), 2, 700);
   if (queued) server.send(202, "text/plain", "QUEUED");
   else server.send(500, "text/plain", "ERR");
@@ -510,6 +547,7 @@ void webBegin() {
   server.on("/worker/remove", HTTP_POST, handleWorkerRemove);
   server.on("/worker/update", HTTP_POST, handleWorkerUpdate);
   server.on("/worker/water", HTTP_POST, handleWorkerWater);
+  server.on("/wifi/clear", HTTP_POST, handleClearWifiCred);
   server.begin();
   // OTA handled via ArduinoOTA in main setup
 }

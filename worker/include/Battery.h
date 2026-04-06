@@ -1,5 +1,7 @@
 #pragma once
 #include <Arduino.h>
+#include "Utility.h"
 
 void battBegin();
-int readBattLevel();
+void readBattLevel();
+uint8_t getBattLevel();
