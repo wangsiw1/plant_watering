@@ -4,4 +4,5 @@
 
 void sensorBegin();
 void readSoilMoisture();
-uint16_t getSoilMoisture();
+// Get soil for channel index (default 0 for single-pot compatibility)
+uint16_t getSoilMoisture(size_t idx = 0);

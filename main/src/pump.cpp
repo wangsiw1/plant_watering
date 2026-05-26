@@ -1,7 +1,6 @@
 #include "Pump.h"
 #include <Arduino.h>
-
-static const int PUMP_PIN = 1;
+#include "HardwareConfig.h"
 
 void pumpBegin() {
   pinMode(PUMP_PIN, OUTPUT);

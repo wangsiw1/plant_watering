@@ -2,9 +2,11 @@
 #include "Sensor.h"
 #include "Valve.h"
 #include "Battery.h"
+#include "HardwareConfig.h"
 #include <NimBLEDevice.h>
-#include <vector>
 #include <cstring>
+#include <esp_mac.h>
+#include <inttypes.h>
 
 using namespace BT_TLV;
 
@@ -25,91 +27,103 @@ bool btLastCommOverdue() { if (millis() - btLastComm >= 300000) return true; ret
 bool mainMacIsSet() { for (int i=0;i<6;i++) if (mainMac[i]!=0) return true; return false; }
 void mainMacReset() { memset(mainMac, 0, sizeof(mainMac)); mainLastNonce = 0; }
 
-void btWorkerAdvertiseStatus(uint16_t soil, uint8_t batt) {
-  uint8_t payload[7];
-  payload[0] = TYPE_SOIL;
-  payload[1] = 2;
-  payload[2] = (uint8_t)((soil >> 8) & 0xFF);
-  payload[3] = (uint8_t)(soil & 0xFF);
-  payload[4] = TYPE_BATT;
-  payload[5] = 1;
-  payload[6] = (uint8_t)(batt & 0xFF);
-  LOG("[->] Advertising status: soil=%d batt=%d", soil, batt);
-  if (mainMacIsSet()) {
-    BT_TLV::btCommonQueueCommand(mainMac, payload, sizeof(payload), 2, 700);
-  } else {
-    BT_TLV::btCommonQueueCommand(BROADCAST_MAC, payload, sizeof(payload), 2, 700);
+void btWorkerAdvertiseStatus() {
+  // Build compact STATUS payload: [TYPE_STATUS][Battery(1)][PotCount(1)][Soil1(2), ...]
+  const size_t payload_len = 3 + 2 * WORKER_POT_COUNT;
+  std::vector<uint8_t> payload(payload_len);
+  payload[0] = TYPE_STATUS;
+  uint8_t batt = getBattLevel();
+  payload[1] = batt;
+  payload[2] = (uint8_t)WORKER_POT_COUNT;
+  for (size_t i = 0; i < WORKER_POT_COUNT; ++i) {
+    uint16_t soil = getSoilMoisture(i);
+    payload[3 + i * 2] = (uint8_t)((soil >> 8) & 0xFF);
+    payload[3 + i * 2 + 1] = (uint8_t)(soil & 0xFF);
   }
+  LOG("[->] Advertising compact STATUS: pots=%d batt=%d", WORKER_POT_COUNT, batt);
+  if (mainMacIsSet()) BT_TLV::btCommonQueueCommand(mainMac, payload.data(), payload.size(), 2, 700);
+  else BT_TLV::btCommonQueueCommand(BROADCAST_MAC, payload.data(), payload.size(), 2, 700);
 }
 
 static void parseAdvert(const uint8_t* data, size_t len, const NimBLEAdvertisedDevice* adv) {
   if (!data) return;
-  
-  uint8_t tgtMac[6];
-  if (tlv_extract_tgt_mac(data,len,tgtMac) && (memcmp(tgtMac, thisMac, 6)==0)) {
-    uint8_t srcMac[6];
-    extract_src_mac(adv, srcMac);
-    LOG("[<-] Received advert from MAC: %02X:%02X:%02X:%02X:%02X:%02X", srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
-      
-    // learn main MAC on first command (use advertiser address from adv)
-    if (!mainMacIsSet()) {
-      LOG("Learning main MAC from advertiser");
-      memcpy(mainMac, srcMac, 6);
-    }
 
-    // if mainMac is set, only accept commands from that advertiser address
-    if (mainMacIsSet() && memcmp(srcMac, mainMac, 6) != 0) {
+  // Parse compact header (CompanyID already stripped by common callback)
+  uint8_t compactTarget[6]; uint16_t nonce; const uint8_t* payload_ptr; size_t payload_len;
+  if (!parse_compact_packet_header(data, len, compactTarget, nonce, payload_ptr, payload_len)) return;
+  if (memcmp(compactTarget, thisMac, 6) != 0) return;
+
+  uint8_t srcMac[6]; extract_src_mac(adv, srcMac);
+  LOG("[<-] (compact) Received advert from MAC: %02X:%02X:%02X:%02X:%02X:%02X", srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
+
+  // learn main MAC on first command
+  if (!mainMacIsSet()) { LOG("Learning main MAC from advertiser"); memcpy(mainMac, srcMac, 6); }
+  if (mainMacIsSet() && memcmp(srcMac, mainMac, 6) != 0) return;
+
+  // ACK handling (mark pending if present)
+  if (payload_len >= 1 && payload_ptr[0] == BT_TLV::TYPE_ACK) {
+    LOG("[v] [%d] Received ACK (compact)", nonce);
+    BT_TLV::btCommonMarkAck(nonce);
+    return;
+  }
+
+  // send ACK back
+  BT_TLV::btCommonQueueAck(srcMac, nonce);
+  LOG("[->] [%d] Sending ACK (compact)", nonce);
+  btLastComm = millis();
+
+  if (nonce == mainLastNonce) { LOG("[x] [%d] Skip duplication", nonce); return; }
+  mainLastNonce = nonce;
+  LOG("[<-] [%d] Received compact command for this node", nonce);
+
+  // Handle compact commands
+  if (payload_len >= 1 && payload_ptr[0] == BT_TLV::TYPE_CMD_PROBE) {
+    LOG("[<-] [%d] Received CMD_PROBE (compact)", nonce);
+    btWorkerAdvertiseStatus();
+  }
+  else if (payload_len >= 1 && payload_ptr[0] == BT_TLV::TYPE_CMD_WATER) {
+    // New compact format (required):
+    // [TYPE_CMD_WATER][potMask(2)][dur1(2), dur2(2), ...]
+    // Durations correspond to set bits in potMask in increasing pot index order (0..N-1).
+    // Example: if potMask has bits for pots 0,2,3 then durations = [dur_for_0, dur_for_2, dur_for_3].
+    if (payload_len < 3) {
+      LOG("[<-] [%d] CMD_WATER missing mask/durations", nonce);
       return;
     }
- 
-    // If this advert is an ACK from a worker, mark pending command as acknowledged
-    uint16_t ackNonce;
-    if (tlv_extract_ack(data,len,ackNonce)) {
-      LOG("[v] [%d] Received ACK", ackNonce);
-      BT_TLV::btCommonMarkAck(ackNonce);
-      return;
+    uint16_t potMask = (uint16_t(payload_ptr[1])<<8) | uint16_t(payload_ptr[2]);
+    size_t remaining = payload_len - 3;
+    size_t durationsCount = remaining / 2;
+    uint16_t durations[WORKER_POT_COUNT];
+    for (size_t di = 0; di < durationsCount; ++di) {
+      durations[di] = (uint16_t(payload_ptr[3 + di*2])<<8) | uint16_t(payload_ptr[3 + di*2 + 1]);
     }
-
-    uint16_t nonce;
-    tlv_extract_nonce(data,len,nonce);
-    // send ACK (include our MAC to scope the ACK to this system)
-    BT_TLV::btCommonQueueAck(srcMac, nonce);
-    LOG("[->] [%d] Sending ACK", nonce);
-    btLastComm = millis();
-
-    if (nonce == mainLastNonce) { LOG("[x] [%d] Skip duplication", nonce); return; } 
-    mainLastNonce = nonce;
-    LOG("[<-] [%d] Received command for this node", nonce);
-
-    // Use helper extractors for command TLVs
-    uint16_t duration;
-    uint32_t delay_s;
-    if (tlv_extract_cmd_probe(data, len)) {
-      LOG("[<-] [%d] Received CMD_PROBE command", nonce);
-      uint16_t soil = getSoilMoisture();
-      uint8_t batt = getBattLevel();
-      btWorkerAdvertiseStatus(soil, batt);
+    LOG("[<-] [%d] Received CMD_WATER (compact) mask=%04X durations=%d", nonce, potMask, (int)durationsCount);
+    size_t di = 0;
+    for (int pi = 0; pi < WORKER_POT_COUNT; ++pi) {
+      if (potMask & (1u << pi)) {
+        uint16_t duration = (di < durationsCount) ? durations[di++] : 0;
+        valveSetMask((uint16_t)(1u << pi));
+        vTaskDelay(pdMS_TO_TICKS(duration * 1000));
+        valveSetMask(0);
+        vTaskDelay(pdMS_TO_TICKS(50));
+      }
     }
-    else if (tlv_extract_cmd_water(data, len, duration)) {
-      LOG("[<-] [%d] Received CMD_WATER command for %d seconds", nonce, duration);
-      valveOn();
-      vTaskDelay(pdMS_TO_TICKS(duration * 1000));
-      valveOff();
-      // enqueue the CMD_WATER TLV (type+len+value)
-      uint8_t buf[4]; 
-      buf[0] = TYPE_CMD_WATER; 
-      buf[1] = 2; 
-      buf[2] = (uint8_t)(duration>>8); 
-      buf[3] = (uint8_t)(duration & 0xFF);
-      LOG("[->] Queuing water confirmation to main");
-      BT_TLV::btCommonQueueCommand(mainMac, buf, sizeof(buf), 2, 700);
+    // Send simple completion notice back to main: [TYPE_CMD_WATER][potMask(2)]
+    uint8_t buf[3];
+    buf[0] = BT_TLV::TYPE_CMD_WATER;
+    buf[1] = (uint8_t)((potMask >> 8) & 0xFF);
+    buf[2] = (uint8_t)(potMask & 0xFF);
+    BT_TLV::btCommonQueueCommand(mainMac, buf, 3, 2, 700);
+  }
+  else if (payload_len >= 1 && payload_ptr[0] == BT_TLV::TYPE_CMD_SLEEP) {
+    uint32_t delay_s = 0;
+    if (payload_len >= 5) {
+      delay_s = (uint32_t(payload_ptr[1])<<24) | (uint32_t(payload_ptr[2])<<16) | (uint32_t(payload_ptr[3])<<8) | uint32_t(payload_ptr[4]);
     }
-    else if (tlv_extract_cmd_sleep(data, len, delay_s)) {
-      LOG("[<-] [%d] Received CMD_SLEEP command for %d seconds", nonce, delay_s);
-      esp_sleep_enable_timer_wakeup((uint64_t)delay_s * 1000000ULL);
-      vTaskDelay(pdMS_TO_TICKS(50));
-      esp_deep_sleep_start();
-    }
+    LOG("[<-] [%d] Received CMD_SLEEP (compact) for %" PRIu32 " seconds", nonce, delay_s);
+    esp_sleep_enable_timer_wakeup((uint64_t)delay_s * 1000000ULL);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    esp_deep_sleep_start();
   }
 }
 

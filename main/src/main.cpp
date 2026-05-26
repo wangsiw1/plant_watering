@@ -57,7 +57,7 @@ void TaskWatering(void *pvParameters) {
 			for (int i = 0; i < nc; ++i) {
 				const WorkerNode* n = btMainNodeAt(i);
 				if (!n) continue;
-				uint8_t probePayload[2]; probePayload[0] = BT_TLV::TYPE_CMD_PROBE; probePayload[1] = 0; // TLV: type + len=0
+				uint8_t probePayload[1]; probePayload[0] = BT_TLV::TYPE_CMD_PROBE; // compact: just msgType
 				btMainQueueCommand(n->mac, probePayload, sizeof(probePayload), 1, 500);
 				vTaskDelay(pdMS_TO_TICKS(150));
 			}
@@ -82,11 +82,15 @@ void TaskWatering(void *pvParameters) {
 		std::vector<const WorkerConfig*> toWater;
 		for (int wi = 0; wi < workerListCount; ++wi) {
 			const WorkerConfig &wc = workerList[wi];
-			const WorkerNode* n = btMainFindNodeByMac(wc.mac);
-			uint16_t thr = wc.threshold;
-			// skip if no data or not synced within recent interval
-			if (!n || (now_s > n->lastSync && now_s - n->lastSync > settings.dataSyncInterval)) continue;
-			if (n->soil > 0 && n->soil < thr) toWater.push_back(&workerList[wi]);
+				const WorkerNode* n = btMainFindNodeByMac(wc.mac);
+				uint16_t thr = wc.threshold;
+				// skip if no data or not synced within recent interval
+				if (!n || (now_s > n->lastSync && now_s - n->lastSync > settings.dataSyncInterval)) continue;
+				// check per-pot soil value
+				if (wc.potIndex < n->potCount) {
+					uint16_t soil = n->soils[wc.potIndex];
+					if (soil > 0 && soil < thr) toWater.push_back(&workerList[wi]);
+				}
 		}
 
 		if (toWater.empty()) {
@@ -105,14 +109,13 @@ void TaskWatering(void *pvParameters) {
 		uint32_t sleepSec = calculateSleepSec(now_s);
 		for (int wi = 0; wi < workerListCount; ++wi) {
 			const WorkerConfig &wc = workerList[wi];
-			uint8_t payload[6];
-			payload[0] = BT_TLV::TYPE_CMD_SLEEP; // TLV type
-			payload[1] = 4; // length
+			uint8_t payload[5];
+			payload[0] = BT_TLV::TYPE_CMD_SLEEP; // compact: msgType
 			// encode big-endian uint32 seconds
-			payload[2] = (uint8_t)((sleepSec >> 24) & 0xFF);
-			payload[3] = (uint8_t)((sleepSec >> 16) & 0xFF);
-			payload[4] = (uint8_t)((sleepSec >> 8) & 0xFF);
-			payload[5] = (uint8_t)(sleepSec & 0xFF);
+			payload[1] = (uint8_t)((sleepSec >> 24) & 0xFF);
+			payload[2] = (uint8_t)((sleepSec >> 16) & 0xFF);
+			payload[3] = (uint8_t)((sleepSec >> 8) & 0xFF);
+			payload[4] = (uint8_t)(sleepSec & 0xFF);
 			btMainQueueCommand(wc.mac, payload, sizeof(payload), 2, 700);
 			vTaskDelay(pdMS_TO_TICKS(50));
 		}
@@ -122,6 +125,7 @@ void TaskWatering(void *pvParameters) {
 
 void setup() {
 	Serial.begin(115200);
+	WiFi.setTxPower(WIFI_POWER_8_5dBm);
 	vTaskDelay(pdMS_TO_TICKS(3000));
 	LOG("Bluetooth MAC address: %s", getBtMac());
 
@@ -170,7 +174,8 @@ void setup() {
 }
 
 void loop() {
-	// Let FreeRTOS tasks do the work. Keep loop empty.
+	// Let FreeRTOS tasks do the work. Keep loop for housekeeping.
 	// ArduinoOTA.handle();
+	maybeSaveSettings();
 	vTaskDelay(pdMS_TO_TICKS(1000));
 }

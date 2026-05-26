@@ -19,6 +19,8 @@ namespace BT_TLV {
   constexpr uint8_t TYPE_CMD_PROBE = 0x30; // probe request (len=0)
   constexpr uint8_t TYPE_CMD_SLEEP = 0x31; // sleep request (len=4: seconds)
   constexpr uint8_t TYPE_CMD_WATER = 0x32; // water request (len=2: duration seconds)
+  constexpr uint8_t TYPE_STATUS = 0x40;   // compact STATUS msg (worker -> main)
+  constexpr uint8_t TYPE_CONFIG = 0x41;   // unpaired worker announces potCount
 }
 
 // Shared scan callback wiring
@@ -84,20 +86,32 @@ namespace BT_TLV {
 const uint8_t BROADCAST_MAC[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 void extract_src_mac(const NimBLEAdvertisedDevice* adv, uint8_t out_mac[6]);
-// Helpers for parsing TLV blobs (non-owning). Return true if field found.
-bool tlv_extract_tgt_mac(const uint8_t* data, size_t len, uint8_t out_mac[6]);
-bool tlv_extract_soil(const uint8_t* data, size_t len, uint16_t &soil);
-bool tlv_extract_batt(const uint8_t* data, size_t len, uint8_t &batt);
-bool tlv_extract_nonce(const uint8_t* data, size_t len, uint16_t &nonce);
-// Extract TYPE_ACK nonce
-bool tlv_extract_ack(const uint8_t* data, size_t len, uint16_t &nonce);
-// Get payload blob pointer and length if present
-// (tlv_extract_payload removed) — command TLVs should be parsed by scanning TLVs.
 
-// Helpers to build common TLV packets
-size_t tlv_make_command(const uint8_t target_mac[6], uint16_t nonce, const uint8_t* payload, size_t payload_len, uint8_t* out, bool is_ack);
+// Legacy TLV parsing helpers were removed. The codebase now uses the
+// compact packet format (CompanyID + TargetMAC(6) + Nonce(2) + payload...).
 
-// Helpers to extract command TLV fields (return true if found)
-bool tlv_extract_cmd_probe(const uint8_t* data, size_t len);
-bool tlv_extract_cmd_water(const uint8_t* data, size_t len, uint16_t &duration);
-bool tlv_extract_cmd_sleep(const uint8_t* data, size_t len, uint32_t &delay_s);
+size_t make_compact_packet(const uint8_t target_mac[6], uint16_t nonce, const uint8_t* payload, size_t payload_len, uint8_t* out, bool encrypt);
+
+// Compact packet parsing helpers (new format: CompanyID + TargetMAC(6) + Nonce(2) + Payload...)
+// Parse a compact packet (data starts AFTER CompanyID). On success returns true and fills
+// `out_target_mac`, `nonce` and returns pointer/len to payload (payload begins with msgType byte).
+bool parse_compact_packet_header(const uint8_t* data, size_t len, uint8_t out_target_mac[6], uint16_t &nonce, const uint8_t*& payload_ptr, size_t &payload_len);
+
+// Placeholder encryption API: encrypt/decrypt the bytes AFTER the CompanyID prefix.
+// These are no-ops by default; implement real crypto later and call here.
+// New signature accepts target MAC and nonce so AEAD IV can be derived deterministically.
+// Returns true on success and fills out_len with the output length (ciphertext+tag or plaintext).
+bool btEncryptPayload(const uint8_t* in, size_t in_len, const uint8_t target_mac[6], uint16_t nonce, uint8_t* out, size_t &out_len);
+bool btDecryptPayload(const uint8_t* in, size_t in_len, const uint8_t target_mac[6], uint16_t nonce, uint8_t* out, size_t &out_len);
+
+// Compile-time flag to enable BT encryption. Defaults to enabled (AES-GCM).
+#ifndef USE_BT_CRYPTO
+#define USE_BT_CRYPTO 1
+#endif
+
+  // Feature flag: enable extended adverts (requires host/stack support). Default: 0 (legacy)
+#ifndef USE_EXT_ADV
+#define USE_EXT_ADV 0
+#endif
+
+// Command helpers migrated to compact payload interpretation.

@@ -71,73 +71,65 @@ Goal: As a worker device, it will have a capacitive soil moisture sensor and a s
       - If worker node does not respond after retries, main node marks it as disconnected and continue
       - If main node does not respond to worker node, reset the worker node itself and start over from worker node connection procedure
 
-## Bluetooth TLV Payload
+## Bluetooth payload format (compact + AEAD)
 
-This project uses a compact TLV (Type-Length-Value) format carried inside the BLE
-Advertisement `Manufacturer Specific Data` field (AD type 0xFF). Keep advertisement
-packets small — the AD payload (Company ID + TLV bytes) must fit within 31 bytes.
+The worker uses the compact packet layout described below for both status advertisements
+and command handling. When extended advertising is available a full STATUS (multiple soils)
+can be sent in one advert; otherwise the compact format minimizes the need for chunking.
 
 Envelope
 - 2 bytes: Company Identifier (little-endian). For local testing use `0xFFFF`.
-- Followed by TLV bytes.
+- Followed by payload starting at TargetMAC.
 
-TLV field format
-- 1 byte: Type
-- 1 byte: Length (N)
-- N bytes: Value
+Compact packet layout
+- CompanyID (2 bytes)
+- TargetMAC (6 bytes)
+- Nonce (2 bytes, big-endian)
+- MsgPayload: [MsgType(1), ...]
 
-Byte order and limits
-- Multi-byte integers: big-endian in TLV values (network order).
-- Max adv payload: 31 bytes (CompanyID + TLV). Use scan-response or split messages only if needed.
+MsgType examples
+- `0x40` TYPE_STATUS: [TYPE_STATUS][Battery(1)][PotCount(1)][Soil1(2), ...]
+- `0x32` TYPE_CMD_WATER: [TYPE_CMD_WATER][PotMask(2)][DurationArray(2*N)]
+  - PotMask: 16-bit bitmask where bit `i` corresponds to pot `i`.
+  - DurationArray: N 16-bit big-endian seconds, where N is the count of set bits in PotMask.
+    Durations are listed in increasing pot-index order for the set bits.
+    Example: if PotMask has bits for pots 0, 2, 3, then DurationArray = [dur_0, dur_2, dur_3].
+- `0x30` TYPE_CMD_PROBE: probe request (no payload)
+- `0x20` TYPE_ACK: acknowledgement
 
-Defined types (used in code)
-- `0x01` TYPE_MAC  : 6 bytes — device MAC (worker -> main status)
-- `0x02` TYPE_SOIL : 2 bytes — soil ADC (uint16)
-- `0x03` TYPE_BATT : 1 byte  — battery percent
-- `0x11` TYPE_NONCE: 2 bytes — nonce for request/ACK correlation (uint16)
- - `0x12` TYPE_TARGET: REMOVED; target MAC is carried using `0x01` TYPE_MAC
- - Command TLV types (embedded in the command body):
-   - `0x30` TYPE_CMD_PROBE: probe request (len=0)
-   - `0x31` TYPE_CMD_SYNC: sleep/sync request (len=4 — seconds)
-   - `0x32` TYPE_CMD_WATER: water request (len=2 — duration seconds)
- - `0x20` TYPE_ACK  : 2 bytes — ACK TLV carrying a nonce
+Encryption (AEAD)
+- If `USE_BT_CRYPTO` is enabled the worker encrypts the MsgPayload using AES-GCM
+  and appends the 16-byte tag. The receiver (main) will attempt to decrypt; on failure
+  the receiver falls back to raw payload parsing to preserve interoperability.
+- IV derivation: IV = first 12 bytes of HMAC-SHA256(network_key, target_mac || nonce || "btiv").
 
-Command IDs (embedded in payload)
-- `CMD_PROBE = 0x01` — ask worker to broadcast status immediately
-- `CMD_SYNC  = 0x02` — set next wake/sync time (payload encodes delay)
-- `CMD_WATER = 0x03` — instruct worker to open valve for a duration
+Extended advertising
+- When `USE_EXT_ADV` is active and supported, use extended adverts to send larger STATUS
+  payloads. Otherwise the worker uses legacy adverts with the compact header.
 
-Example: Probe (main -> worker)
-- CompanyID(2)
-- TYPE_MAC(1) LEN(1) MAC(6)  # target MAC carried using TYPE_MAC
-- TYPE_NONCE(1) LEN(1) NONCE(2)
- - TYPE_CMD_PROBE(1) LEN(1=0)  # TLV field with type 0x30 and length 0
-
-Example: Water 10 seconds (main -> worker)
-- CompanyID(2)
-- TYPE_MAC LEN MAC  # target MAC carried using TYPE_MAC
-- TYPE_NONCE LEN NONCE
- - TYPE_CMD_WATER LEN [duration (2 bytes big-endian)]
-
-Worker responses
-- On command targeted to the worker, it should immediately advertise an ACK TLV:
-  TYPE_ACK (2 bytes: nonce) — this lets the main mark the command acknowledged.
-- The worker then performs the action (e.g., open valve) and may follow with a STATUS
-  advertisement containing TYPE_MAC, TYPE_SOIL and TYPE_BATT.
-
-ACK semantics and retries
-- Main generates a monotonic uint16 nonce (non-zero) per command and retransmits the
-  same TLV (same nonce) on timeout.
-- Worker must tolerate duplicate commands and ignore repeated commands already acknowledged/executed.
-
-Size guidance
-- Keep TLV compact and avoid sending large blobs — a typical command fits well within 31 bytes.
-- If more data is needed, use the scan response to include additional fields or design
-  a small multi-step exchange.
+Legacy TLV compatibility
+- TLV helpers are still available but the worker now prefers the compact format.
+  The sender-side conversion from TLV to compact is only performed when the queued
+  buffer clearly matches TLV semantics (length byte exactly matches remaining bytes).
 
 Implementation notes
-- Code helpers to parse and construct these TLVs are in `include/BluetoothCommon.h` and
-  `src/bluetooth_common.cpp` so they can be reused by both main and worker firmware.
+- `btWorkerAdvertiseStatus()` constructs the compact STATUS payload and queues it via
+  `btCommonQueueCommand()` (which builds the CompanyID+header). `parse_compact_packet_header()`
+  is used to parse and decrypt received compact packets.
+
+Hardware build variants
+-----------------------
+This worker firmware supports multiple hardware variants selected at compile time via a
+single `HW_TARGET_*` build flag. The flag determines pin mappings and the number of pots.
+
+Examples:
+- `HW_V1_1POT_REV_A` : original single-pot hardware (SOIL_PIN=3, VALVE_PIN=1)
+- `HW_V2_8POT_REV_A` : 8-pot with multiplexer (3 select pins) + one shift-register chip
+- `HW_V2_8POT_REV_B` : 8-pot variant with alternate pin assignments
+
+Set the build flag in `platformio.ini` or your build command (see platformio envs in repository).
+For multi-pot variants, `USE_EXT_ADV` should be enabled to avoid BLE legacy advertisement
+truncation (the build configuration provides example envs).
 
 
 

@@ -1,5 +1,7 @@
 #include "Utility.h"
 #include "config.h"
+#include <time.h>
+#include <WiFi.h>
 
 
 static String getMacAddr(esp_mac_type_t device) {
@@ -44,15 +46,18 @@ const String& getBtMac()
 void setUserTimeOfDaySec(uint32_t secOfDay) {
   // store into global settings and persist via saveSettings()
   settings.savedTimeOfDaySec = secOfDay % 86400;
-  settings.savedMillis = millis();
-  saveSettings();
+  settings.savedMillis = (uint64_t)millis();
+  markSettingsDirty();
 }
 
 uint32_t getCurrentTimeOfDaySec() {
-  // compute delta millis wrap-safe
-  unsigned long now = millis();
-  unsigned long delta = now - settings.savedMillis;
-  uint32_t addSec = (uint32_t)(delta / 1000UL);
+  // Prefer epoch when available
+  uint64_t epoch = getCurrentEpochSec();
+  if (epoch != 0) return (uint32_t)(epoch % 86400u);
+  // compute delta millis wrap-safe fallback
+  uint64_t now = (uint64_t)millis();
+  uint64_t delta = now - settings.savedMillis;
+  uint32_t addSec = (uint32_t)(delta / 1000ULL);
   return (settings.savedTimeOfDaySec + addSec) % 86400u;
 }
 
@@ -67,4 +72,39 @@ uint32_t calculateSleepSec(unsigned long now_s) {
   uint32_t sleepSec = (uint32_t)desired;
 
   return sleepSec;
+}
+
+void setUserEpoch(uint64_t epochSec) {
+  settings.savedEpochSec = epochSec;
+  settings.savedEpochMillis = (uint64_t)millis();
+  markSettingsDirty();
+}
+
+uint64_t getCurrentEpochSec() {
+  if (settings.savedEpochSec != 0) {
+    uint64_t now = (uint64_t)millis();
+    uint64_t delta = now - settings.savedEpochMillis;
+    uint64_t addSec = (uint64_t)(delta / 1000ULL);
+    return settings.savedEpochSec + addSec;
+  }
+  return 0;
+}
+
+bool trySyncNTP(unsigned long timeoutMs) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    time_t utc = time(nullptr);
+    if (utc > 1600000000) {
+      int32_t tzSec = (int32_t)settings.tzOffsetMinutes * 60;
+      uint64_t localEpoch = (uint64_t)utc + (uint64_t)tzSec;
+      setUserEpoch(localEpoch);
+      // persist immediately on successful sync
+      saveSettings();
+      return true;
+    }
+    delay(200);
+  }
+  return false;
 }

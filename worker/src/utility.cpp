@@ -1,4 +1,5 @@
 #include "Utility.h"
+#include <esp_mac.h>
 
 static String getMacAddr(esp_mac_type_t device) {
 	uint8_t mac[6];

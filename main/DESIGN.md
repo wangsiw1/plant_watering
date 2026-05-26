@@ -197,73 +197,63 @@ TBD
 
 ## Quick reference
 
-## Bluetooth TLV Payload
+## Bluetooth payload format (compact + AEAD)
 
-This project uses a compact TLV (Type-Length-Value) format carried inside the BLE
-Advertisement `Manufacturer Specific Data` field (AD type 0xFF). Keep advertisement
-packets small — the AD payload (Company ID + TLV bytes) must fit within 31 bytes.
+This project moved from a TLV-first encoding to a compact, fixed-position header to
+reduce per-field overhead and allow multiple soil readings inside a single advertisement.
+When extended advertising is available the full STATUS payload can be sent in one advert;
+otherwise the compact layout minimizes fragmentation over legacy 31-byte adverts.
 
 Envelope
 - 2 bytes: Company Identifier (little-endian). For local testing use `0xFFFF`.
-- Followed by TLV bytes.
+- Followed by payload beginning at TargetMAC (see compact layout below).
 
-TLV field format
-- 1 byte: Type
-- 1 byte: Length (N)
-- N bytes: Value
+Compact packet layout (preferred)
+- CompanyID (2 bytes, little-endian)
+- TargetMAC (6 bytes) — MAC of the recipient, or `FF:FF:FF:FF:FF:FF` for broadcast
+- Nonce (2 bytes, big-endian) — per-packet nonce for correlation
+- MsgPayload (remaining bytes) — begins with MsgType (1 byte) followed by type-specific fields
 
-Byte order and limits
-- Multi-byte integers: big-endian in TLV values (network order).
-- Max adv payload: 31 bytes (CompanyID + TLV). Use scan-response or split messages only if needed.
+MsgType values
+- `0x30` TYPE_CMD_PROBE  — probe (no payload)
+- `0x31` TYPE_CMD_SLEEP  — [TYPE_CMD_SLEEP][4-byte seconds BE]
+- `0x32` TYPE_CMD_WATER  — compact: [TYPE_CMD_WATER][PotMask(2)][DurationArray(2*N)]
+  - PotMask: 16-bit bitmask where bit `i` corresponds to pot `i`.
+  - DurationArray: N 16-bit big-endian seconds, where N is the count of set bits in PotMask.
+    Durations are listed in increasing pot-index order for the set bits.
+    Example: if PotMask has bits for pots 0, 2, 3, then DurationArray = [dur_0, dur_2, dur_3].
+- `0x40` TYPE_STATUS    — [TYPE_STATUS][Battery(1)][PotCount(1)][Soil1(2), Soil2(2), ...]
+- `0x41` TYPE_CONFIG    — announce potCount when unpaired
+- `0x20` TYPE_ACK       — acknowledge (main/worker will mark pending nonce)
 
-Defined types (used in code)
-- `0x01` TYPE_MAC  : 6 bytes — device MAC (worker -> main status)
-- `0x02` TYPE_SOIL : 2 bytes — soil ADC (uint16)
-- `0x03` TYPE_BATT : 1 byte  — battery percent
-- `0x11` TYPE_NONCE: 2 bytes — nonce for request/ACK correlation (uint16)
- - `0x12` TYPE_TARGET: REMOVED; target MAC is carried using `0x01` TYPE_MAC
- - Command TLV types (embedded in the command body):
-   - `0x30` TYPE_CMD_PROBE: probe request (len=0)
-   - `0x31` TYPE_CMD_SLEEP: sleep request (len=4 — seconds)
-   - `0x32` TYPE_CMD_WATER: water request (len=2 — duration seconds)
-- `0x20` TYPE_ACK  : 2 bytes — ACK TLV carrying a nonce
+Encryption (AEAD)
+- When `USE_BT_CRYPTO` is enabled the MsgPayload (bytes after TargetMAC+Nonce)
+  is encrypted with AES-GCM and the 16-byte authentication tag is appended.
+- IV derivation: IV = first 12 bytes of HMAC-SHA256(network_key, target_mac || nonce || "btiv").
+- Implemented in `btEncryptPayload`/`btDecryptPayload` (mbedTLS GCM). The network key
+  in code is a placeholder; provision keys securely in production (NVS/provisioning).
+- `parse_compact_packet_header()` attempts decryption and on failure returns the raw
+  payload. A reversed-MAC fallback is attempted to work around byte-order mismatches.
 
-Command IDs (embedded in payload)
-- `CMD_PROBE = 0x01` — ask worker to broadcast status immediately
-- `CMD_SLEEP  = 0x02` — set next wake/sync time (payload encodes delay)
-- `CMD_WATER = 0x03` — instruct worker to open valve for a duration
+Extended Advertising
+- When `USE_EXT_ADV` is enabled and stack support is present the system will use
+  extended advertising (`NimBLEExtAdvertising`) to avoid 31-byte limits. Otherwise
+  it falls back to legacy advertising.
 
-Example: Probe (main -> worker)
-- CompanyID(2)
-- TYPE_MAC(1) LEN(1) MAC(6)  # target MAC carried using TYPE_MAC
-- TYPE_NONCE(1) LEN(1) NONCE(2)
-- TYPE_CMD_PROBE(1) LEN(1=0)  # TLV field with type 0x30 and length 0
-
-Example: Water 10 seconds (main -> worker)
-- CompanyID(2)
-- TYPE_MAC LEN MAC  # target MAC carried using TYPE_MAC
-- TYPE_NONCE LEN NONCE
- - TYPE_CMD_WATER LEN [duration (2 bytes big-endian)]
-
-Worker responses
-- On command targeted to the worker, it should immediately advertise an ACK TLV:
-  TYPE_ACK (2 bytes: nonce) — this lets the main mark the command acknowledged.
-- The worker then performs the action (e.g., open valve) and may follow with a STATUS
-  advertisement containing TYPE_MAC, TYPE_SOIL and TYPE_BATT.
-
-ACK semantics and retries
-- Main generates a monotonic uint16 nonce (non-zero) per command and retransmits the
-  same TLV (same nonce) on timeout.
-- Worker must tolerate duplicate commands and ignore repeated commands already acknowledged/executed.
-
-Size guidance
-- Keep TLV compact and avoid sending large blobs — a typical command fits well within 31 bytes.
-- If more data is needed, use the scan response to include additional fields or design
-  a small multi-step exchange.
+Legacy TLV compatibility
+- The project retains TLV parsing helpers for interoperability. When a command is
+  queued via `btCommonQueueCommand()` the sender will convert TLV -> compact only
+  when the queued buffer looks exactly like a TLV payload (the length byte must
+  exactly match the remaining bytes). This prevents mis-detection where a compact
+  payload's data byte (e.g., battery) could be mistaken for a TLV length.
 
 Implementation notes
-- Code helpers to parse and construct these TLVs are in `include/BluetoothCommon.h` and
-  `src/bluetooth_common.cpp` so they can be reused by both main and worker firmware.
+- `parse_compact_packet_header()` (in `src/bluetooth_common.cpp`) takes data starting
+  after the CompanyID and returns the target MAC, nonce and a pointer/length to the
+  (possibly decrypted) MsgPayload.
+- AES-GCM code and IV derivation live in `src/bluetooth_crypto.cpp`.
+- The web UI and `WorkerNode` structures were updated to store per-device arrays
+  of soils and `potCount` so the compact STATUS payload maps directly to the UI.
 
 
 

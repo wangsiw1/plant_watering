@@ -1,0 +1,7 @@
+main:
+    v1: http://plant-watering-cc9cdc.local/
+    v2: http://plant-watering-9152f8.local/
+
+worker:
+    1pot_revA_1st: 1CDBD4C08236
+    8pot_revA_1st: 10003BCBE922

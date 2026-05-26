@@ -16,28 +16,30 @@ static uint8_t thisMac[6];
 static WorkerNode nodes[MAX_WORKER_COUNT];
 static int nodeCount = 0;
 
-static void updateNode(const uint8_t mac[6], uint16_t soil, uint8_t batt) {
-  // Check if node is added
+static void updateNode(const uint8_t mac[6], const uint16_t *soils, uint8_t potCount, uint8_t batt) {
+  // Only update nodes for configured workers
   bool worker_added = false;
-  for (int i=0;i<workerListCount;i++) {
-    if (memcmp(workerList[i].mac, mac, 6)==0) {
-      worker_added = true;
-      break;
-    }
+  for (int i = 0; i < workerListCount; ++i) {
+    if (memcmp(workerList[i].mac, mac, 6) == 0) { worker_added = true; break; }
   }
   if (!worker_added) return;
-  for (int i=0;i<nodeCount;i++) {
-    if (memcmp(nodes[i].mac, mac, 6)==0) {
-      nodes[i].soil = soil; 
-      nodes[i].battery = batt; 
-      nodes[i].lastSync = millis()/1000; 
+
+  // Find existing discovery cache entry and update soils/battery/lastSync
+  for (int i = 0; i < nodeCount; ++i) {
+    if (memcmp(nodes[i].mac, mac, 6) == 0) {
+      nodes[i].battery = batt;
+      nodes[i].potCount = (uint8_t)min((size_t)potCount, (size_t)MAX_POTS_PER_DEVICE);
+      for (size_t s = 0; s < nodes[i].potCount; ++s) {
+        if (soils && s < potCount) nodes[i].soils[s] = soils[s];
+        else nodes[i].soils[s] = 0;
+      }
+      nodes[i].lastSync = millis() / 1000;
+      // Ensure persisted per-pot configs exist for this worker now that we know potCount
+      ensureWorkerConfigsForMac(nodes[i].mac, nodes[i].potCount);
       return;
     }
   }
-  // Do not create a new node here. Node placeholders are created when a worker
-  // is added via addWorkerByHex (btMainEnsureNodeExists). This avoids keeping
-  // discovery cache entries for non-configured workers and centralizes init.
-  return;
+  // Do not create a new node here; placeholders are created via btMainEnsureNodeExists
 }
 
 // Ensure a placeholder node exists in the discovery cache for the given MAC.
@@ -48,10 +50,12 @@ void btMainEnsureNodeExists(const uint8_t mac[6]) {
   }
   if (nodeCount >= MAX_WORKER_COUNT) return;
   memcpy(nodes[nodeCount].mac, mac, 6);
-  nodes[nodeCount].soil = 0;
+  // initialize soils array and basic metadata (unknown potCount until worker syncs)
+  nodes[nodeCount].potCount = 0;
+  for (int si = 0; si < MAX_POTS_PER_DEVICE; ++si) nodes[nodeCount].soils[si] = 0;
   nodes[nodeCount].battery = 0;
   nodes[nodeCount].lastSync = 0;
-  nodes[nodeCount].lastWater = 0;
+  for (int si = 0; si < MAX_POTS_PER_DEVICE; ++si) nodes[nodeCount].lastWater[si] = 0;
   nodes[nodeCount].lastNonce = 0;
   nodeCount++;
 }
@@ -97,66 +101,79 @@ static void btMainCleanupTask(void* param) {
 
 static void parseAdvert(const uint8_t* data, size_t len, const NimBLEAdvertisedDevice* adv) {
   if (!data) return;
-  
-  // Otherwise treat as worker status update (TYPE_MAC in TLV is target MAC on commands; the advertiser address
-  // identifies the sender). Extract worker-reported fields and update node list.
-  uint8_t tgtMac[6];
-  if (tlv_extract_tgt_mac(data,len,tgtMac) && (memcmp(tgtMac, thisMac, 6)==0 || memcmp(tgtMac, BROADCAST_MAC, 6)==0)) {
-    uint8_t srcMac[6];
-    extract_src_mac(adv, srcMac);
-    LOG("[<-] Received advert from worker MAC: %02X:%02X:%02X:%02X:%02X:%02X", srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
-  
-    // If this advert is an ACK from a worker, mark pending command as acknowledged
-    uint16_t ackNonce;
-    if (tlv_extract_ack(data,len,ackNonce)) {
-      LOG("[v] [%d] Received ACK from worker", ackNonce);
-      BT_TLV::btCommonMarkAck(ackNonce);
-      onCommandAcked(srcMac, ackNonce);
-      return;
-    }
 
-    uint16_t nonce;
-    tlv_extract_nonce(data,len,nonce);
-    BT_TLV::btCommonQueueAck(srcMac, nonce);
-    LOG("[->] [%d] Sent ACK to worker", nonce);
+  // Parse compact packet header (CompanyID already stripped by common scan cb)
+  uint8_t compactTarget[6]; uint16_t nonce; const uint8_t* payload_ptr; size_t payload_len;
+  if (!parse_compact_packet_header(data, len, compactTarget, nonce, payload_ptr, payload_len)) return;
+  if (memcmp(compactTarget, thisMac, 6) != 0 && memcmp(compactTarget, BROADCAST_MAC, 6) != 0) return;
 
-    uint8_t nonceUpdateResult = btMainSetNodeLastNonce(srcMac, nonce);
-    if (nonceUpdateResult == 0) {
-      LOG("[x] [%d] Skip not added node", nonce); return;
-    } else if (nonceUpdateResult == 2) {
-      LOG("[x] [%d] Skip duplication", nonce); return;
-    }
-    LOG("[<-] [%d] Received status update from worker", nonce);
+  uint8_t srcMac[6]; extract_src_mac(adv, srcMac);
+  LOG("[<-] (compact) Received advert from worker MAC: %02X:%02X:%02X:%02X:%02X:%02X", srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
 
-    uint16_t soil; uint8_t batt;
-    if (tlv_extract_soil(data,len,soil) && tlv_extract_batt(data,len,batt)) {
-      LOG("[<-] [%d] Received soil=%d batt=%d from worker", nonce, soil, batt);
-      updateNode(srcMac, soil, batt);
+  // ACK handling: payload begins with MsgType
+  if (payload_len >= 1 && payload_ptr[0] == BT_TLV::TYPE_ACK) {
+    LOG("[v] [%d] Received ACK (compact) from worker", nonce);
+    BT_TLV::btCommonMarkAck(nonce);
+    onCommandAcked(srcMac, nonce);
+    return;
+  }
+
+  // Queue ACK back to sender for any non-ACK compact messages
+  BT_TLV::btCommonQueueAck(srcMac, nonce);
+  LOG("[->] [%d] Sent ACK to worker (compact)", nonce);
+
+  uint8_t updateResult = btMainSetNodeLastNonce(srcMac, nonce);
+  if (updateResult == 0) { LOG("[x] [%d] Skip not added node", nonce); return; }
+  else if (updateResult == 2) { LOG("[x] [%d] Skip duplication", nonce); return; }
+  LOG("[<-] [%d] Received compact status/command from worker", nonce);
+
+  // Handle STATUS payload (TYPE_STATUS)
+  if (payload_len >= 1 && payload_ptr[0] == BT_TLV::TYPE_STATUS) {
+    // layout: [TYPE_STATUS][Battery(1)][PotCount(1)][Soil1(2), Soil2(2), ...]
+    if (payload_len >= 3) {
+      uint8_t batt = payload_ptr[1];
+      uint8_t potCount = payload_ptr[2];
+      size_t soilsBytes = (payload_len - 3);
+      size_t soilsCount = soilsBytes / 2;
+      size_t toCopy = (potCount < soilsCount) ? potCount : soilsCount;
+      LOG("[<-] [%d] Compact STATUS batt=%d pots=%d soils=%d", nonce, batt, potCount, toCopy);
+      // Update node entry with potCount, battery, and soils (up to MAX_POTS_PER_DEVICE)
+      WorkerNode* node = nullptr;
+      for (int i=0;i<nodeCount;i++) if (memcmp(nodes[i].mac, srcMac, 6)==0) { node = &nodes[i]; break; }
+      // Build soils array and delegate update to updateNode
+      uint16_t tmpSoils[MAX_POTS_PER_DEVICE];
+      for (size_t s = 0; s < (size_t)potCount && s < MAX_POTS_PER_DEVICE; ++s) {
+        if (s < toCopy) tmpSoils[s] = (uint16_t(payload_ptr[3 + s*2]) << 8) | uint16_t(payload_ptr[3 + s*2 + 1]);
+        else tmpSoils[s] = 0;
+      }
+      uint8_t useCount = (uint8_t)min((size_t)potCount, (size_t)MAX_POTS_PER_DEVICE);
+      updateNode(srcMac, tmpSoils, useCount, batt);
 
       if (state == SLEEPING) {
         unsigned long now_s = millis() / 1000;
         uint32_t sleepSec = calculateSleepSec(now_s);
         LOG("Entering SLEEPING state, calculating sleep duration: %d seconds", sleepSec);
 
-        uint8_t payload[6];
-        payload[0] = BT_TLV::TYPE_CMD_SLEEP; // TLV type
-        payload[1] = 4; // length
+        uint8_t payload[5];
+        payload[0] = BT_TLV::TYPE_CMD_SLEEP; // MsgType
         // encode big-endian uint32 seconds
-        payload[2] = (uint8_t)((sleepSec >> 24) & 0xFF);
-        payload[3] = (uint8_t)((sleepSec >> 16) & 0xFF);
-        payload[4] = (uint8_t)((sleepSec >> 8) & 0xFF);
-        payload[5] = (uint8_t)(sleepSec & 0xFF);
+        payload[1] = (uint8_t)((sleepSec >> 24) & 0xFF);
+        payload[2] = (uint8_t)((sleepSec >> 16) & 0xFF);
+        payload[3] = (uint8_t)((sleepSec >> 8) & 0xFF);
+        payload[4] = (uint8_t)(sleepSec & 0xFF);
         LOG("[->] Queuing CMD_SLEEP command to worker %02X:%02X:%02X:%02X:%02X:%02X", srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
         btMainQueueCommand(srcMac, payload, sizeof(payload), 2, 700);
         return;
       }
     }
-    // If advertiser included a command TLV (e.g. BT_TLV::TYPE_CMD_WATER), treat as watering completion
-    uint16_t dur;
-    if (tlv_extract_cmd_water(data, len, dur)) {
-      LOG("[<-] [%d] Received CMD_WATER completion from worker %02X:%02X:%02X:%02X:%02X:%02X", nonce, srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
-      onWorkerCompleted(srcMac);
-    }
+    return;
+  }
+
+  // Handle command-completion notices (worker may echo CMD_WATER as completion)
+  if (payload_len >= 1 && payload_ptr[0] == BT_TLV::TYPE_CMD_WATER) {
+    LOG("[<-] [%d] Received CMD_WATER completion (compact) from worker", nonce);
+    onWorkerCompleted(srcMac);
+    return;
   }
 }
 
@@ -199,9 +216,14 @@ const WorkerNode* btMainFindNodeByMac(const uint8_t mac[6]) {
   return nullptr;
 }
 
-void btMainSetNodeLastWater(const uint8_t mac[6], unsigned long epochSeconds) {
+void btMainSetNodeLastWater(const uint8_t mac[6], uint16_t potMask, unsigned long bootSeconds) {
   for (int i=0;i<nodeCount;i++) {
-    if (memcmp(nodes[i].mac, mac, 6)==0) { nodes[i].lastWater = epochSeconds; break; }
+    if (memcmp(nodes[i].mac, mac, 6)==0) {
+      for (int p = 0; p < MAX_POTS_PER_DEVICE; ++p) {
+        if (potMask & (1u << p)) nodes[i].lastWater[p] = bootSeconds;
+      }
+      break;
+    }
   }
 }
 
