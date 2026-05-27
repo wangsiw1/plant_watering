@@ -3,13 +3,15 @@
 A simple 1 main to multiple workers hardware setup to monitor soil moisture and water series of plant pots automatically.
 
 Main device:
-- Center of the setup, managing the workers, hosting web server for user interactions
+- Gateway of the setup, managing the workers, hosting web server for user interactions
 - Monitoring water level from water container with capacitive sensor
 - Controlling pump for watering
 
 Worker device:
 - Monitoring 1 or more soil moisture sensors and reporting to main
 - Controlling 1 or more two-position three-way solenoid valves to redirect water to different plant pots
+
+<img src="img/architecture.png" width="700">
 
 ## Design
 
