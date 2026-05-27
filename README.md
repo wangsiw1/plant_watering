@@ -13,6 +13,8 @@ Worker device:
 
 <img src="img/architecture.png" width="700">
 
+> **Disclaimer**: LLM has been used in this project as part of the learning process. On hardware side, Google Gemini, Claude AI, and OpenAI ChatGPT were used to explain usage of components, knowledge cross check, and parts recommendation. On software side, GitHub Copilot agent in Visual Studio Code was used to generate part of the code based on design document. Human review, revise, and test was conducted every round of generation.
+
 ## Design
 
 - MCU:
