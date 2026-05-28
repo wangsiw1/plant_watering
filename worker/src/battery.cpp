@@ -29,23 +29,22 @@ void readBattLevel() {
   for (uint8_t i = 0; i < BATT_SAMPLE_COUNT; i++) {
     samples[i] = analogReadMilliVolts(BATT_PIN);
     vTaskDelay(pdMS_TO_TICKS(20));
+  }
 #else
     digitalWrite(BATT_EN_PIN, HIGH);
-    vTaskDelay(pdMS_TO_TICKS(200)); // settle time
+    vTaskDelay(pdMS_TO_TICKS(100)); // settle time
     for (uint8_t i = 0; i < BATT_SAMPLE_COUNT; i++) {
       samples[i] = analogReadMilliVolts(BATT_ADC_PIN);
       vTaskDelay(pdMS_TO_TICKS(20));
+    }
     digitalWrite(BATT_EN_PIN, LOW);
 #endif
-  }
   uint16_t raw = trimmedMean(samples, BATT_SAMPLE_COUNT, BATT_TRIM_COUNT);
-  const float ADC_REF = 3.3f;
-  const int ADC_MAX = 4095;
-  const float VDIV = 2.0f; // assumed divider ratio
-  float bat_v = (raw * (ADC_REF / ADC_MAX)) * VDIV;
+  const float VDIV = 1.66666f; // assumed divider ratio
+  float bat_v = (raw * VDIV) / 1000.0f;
   // Map typical Li-ion range 3.0V - 4.2V to 0-100%
   gBattLevel = (uint8_t)constrain((int)(((bat_v - 3.0f) / (4.2f - 3.0f)) * 100.0f), 0, 100);
-  LOG("Read battery: %d", gBattLevel);
+  LOG("Battery Voltage: %.2fV | Level: %d%%", bat_v, gBattLevel);
 }
 
 uint8_t getBattLevel() {
