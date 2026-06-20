@@ -6,6 +6,7 @@
 static const uint8_t BATT_SAMPLE_COUNT = 10;
 static const uint8_t BATT_TRIM_COUNT = 1;
 volatile uint8_t gBattLevel = 0;
+volatile uint16_t gBattMv = 0;
 
 void battBegin() {
 #if WORKER_POT_COUNT == 1
@@ -19,8 +20,8 @@ void battBegin() {
 	analogSetPinAttenuation(BATT_ADC_PIN, ADC_11db);
   pinMode(BATT_EN_PIN, OUTPUT);
   pinMode(BATT_ADC_PIN, INPUT);
+  pinMode(SHUTDOWN_PIN, OUTPUT);
 #endif
-  readBattLevel();
 }
 
 void readBattLevel() {
@@ -40,13 +41,23 @@ void readBattLevel() {
     digitalWrite(BATT_EN_PIN, LOW);
 #endif
   uint16_t raw = trimmedMean(samples, BATT_SAMPLE_COUNT, BATT_TRIM_COUNT);
-  const float VDIV = 1.66666f; // assumed divider ratio
-  float bat_v = (raw * VDIV) / 1000.0f;
-  // Map typical Li-ion range 3.0V - 4.2V to 0-100%
-  gBattLevel = (uint8_t)constrain((int)(((bat_v - 3.0f) / (4.2f - 3.0f)) * 100.0f), 0, 100);
-  LOG("Battery Voltage: %.2fV | Level: %d%%", bat_v, gBattLevel);
+  const float VDIV = 1.666666f; // 100k and 150k ohm divider ratio
+  gBattMv = (uint16_t)(raw * VDIV);
+  // Map typical Li-ion range 3.3V - 4.2V to 0-100%
+  gBattLevel = (uint8_t)constrain((int)((((float)gBattMv - 3300.0f) / (4200.0f - 3300.0f)) * 100.0f), 0, 100);
+  LOG("Battery Voltage: %.2fV | Level: %d%%", (gBattMv / 1000.0f), gBattLevel);
+#if WORKER_POT_COUNT != 1
+  if (gBattLevel <= 3) {
+    digitalWrite(SHUTDOWN_PIN, HIGH);
+    do {} while(1);
+  }
+#endif
 }
 
 uint8_t getBattLevel() {
   return gBattLevel;
+}
+
+uint16_t getBattMv() {
+  return gBattMv;
 }

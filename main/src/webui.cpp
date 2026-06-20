@@ -1,5 +1,5 @@
 #include "WebUI.h"
-#include "Config.h"
+#include "config.h"
 #include "Utility.h"
 #include "Sensor.h"
 #include "Pump.h"
@@ -12,67 +12,42 @@
 #include <nvs.h>
 #include <esp_system.h>
 #include <WiFi.h>
+#include <freertos/timers.h>
+#include "esp_timer.h"
+#include "WateringManager.h"
 
 static WebServer server(80);
 
-// background task to switch the pump off after a delay (non-blocking web handler)
-static void pumpOffTask(void *pv) {
-  uint32_t delay_ms = 5000;
-  if (pv) {
-    uint32_t *p = (uint32_t*)pv;
-    delay_ms = *p;
-    delete p;
-  }
-  vTaskDelay(pdMS_TO_TICKS(delay_ms));
-  pumpOff();
-  vTaskDelete(NULL);
+static TaskHandle_t sLoopTask = nullptr;
+static TaskHandle_t sWebTask = nullptr;
+static TaskHandle_t sSensorTask = nullptr;
+static TaskHandle_t sWateringTask = nullptr;
+
+void webSetDiagnosticsTaskHandles(TaskHandle_t loopTask,
+                                  TaskHandle_t webTask,
+                                  TaskHandle_t sensorTask,
+                                  TaskHandle_t wateringTask) {
+  sLoopTask = loopTask;
+  sWebTask = webTask;
+  sSensorTask = sensorTask;
+  sWateringTask = wateringTask;
 }
 
-static String makeStatusJson() {
-  int tank = getTankLevel();
-  unsigned long now = millis()/1000;
-  uint32_t tod = getCurrentTimeOfDaySec();
-  JsonDocument doc;
-  doc["name"] = settings.name;
-  doc["auto"] = autoEnabled;
-  doc["tank"] = tank;
-  doc["now"] = now;
-  doc["timeOfDaySec"] = tod;
-  doc["waterInterval"] = settings.waterInterval;
-  doc["dataSyncInterval"] = settings.dataSyncInterval;
-  doc["tzOffsetMinutes"] = settings.tzOffsetMinutes;
-  doc["activeStart"] = settings.activeStart;
-  doc["activeEnd"] = settings.activeEnd;
-  uint64_t curEpoch = getCurrentEpochSec();
-  if (curEpoch) doc["epoch"] = curEpoch;
-  // diagnostics
-  uint32_t freeHeap = ESP.getFreeHeap();
-  uint32_t heapSize = ESP.getHeapSize();
-  uint32_t freeSketch = ESP.getFreeSketchSpace();
-  uint32_t sketchSize = ESP.getSketchSize();
-  uint32_t flashChipSize = ESP.getFlashChipSize();
-  uint32_t chipRev = ESP.getChipRevision();
-  doc["freeHeap"] = freeHeap;
-  doc["heapSize"] = heapSize;
-  doc["freeSketchSpace"] = freeSketch;
-  doc["sketchSize"] = sketchSize;
-  doc["flashChipSize"] = flashChipSize;
-  doc["chipRevision"] = chipRev;
-  // NVS stats (may fail if NVS not initialized)
-  nvs_stats_t nvs_stats; // from nvs_flash.h
-  if (nvs_get_stats(NULL, &nvs_stats) == ESP_OK) {
-    doc["nvs_entries"] = (uint32_t)nvs_stats.used_entries;
-    doc["nvs_total_entries"] = (uint32_t)nvs_stats.total_entries;
-  } else {
-    doc["nvs_entries"] = nullptr;
-    doc["nvs_total_entries"] = nullptr;
+// One-shot timer used to turn the pump off without allocating a task.
+static TimerHandle_t sPumpOffTimer = nullptr;
+static void pumpOffTimerCallback(TimerHandle_t xTimer) {
+  (void)xTimer;
+  pumpOff();
+}
+
+static const char *stateToString(State currentState) {
+  switch (currentState) {
+    case READY: return "READY";
+    case SYNCING: return "SYNCING";
+    case WATERING: return "WATERING";
+    case SLEEPING: return "SLEEPING";
+    default: return "UNKNOWN";
   }
-  // WiFi RSSI if connected
-  if (WiFi.status() == WL_CONNECTED) doc["rssi"] = WiFi.RSSI();
-  else doc["rssi"] = nullptr;
-  String json;
-  serializeJson(doc, json);
-  return json;
 }
 
 void handleRoot() {
@@ -86,12 +61,31 @@ void handleRoot() {
     <style>
       body{font-family:Arial,Helvetica,sans-serif;margin:8px}
       div{margin-top:6px}
-      label{margin-top:6px;display:block;}
       button{padding:6px 10px;margin-top:6px; margin-left:6px}
       table{border-collapse:collapse;width:100%}
     th,td{border:1px solid #ddd;padding:6px;text-align:left}
+    .field{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px}
+    .field label{flex:0 0 150px}
+    .field input:not([type="checkbox"]){box-sizing:border-box;width:100%;max-width:var(--field-width,240px)}
+    .field.short{--field-width:120px}
+    .field.medium{--field-width:240px}
+    .field.long{--field-width:380px}
+    .field.compact label{flex:0 0 auto}
+    .field-row{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;margin-top:6px}
+    .field-row .field{margin-top:0}
+    .actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
+    .actions button{margin-left:0}
+    .meta{color:#666}
     /* pot rows are indented to visually separate from worker headers */
     .pot{margin-left:18px;padding-left:8px;border-left:2px solid #eee;background:#fafafa}
+    @media (max-width:600px){
+      .field{display:block}
+      .field label{display:block;margin-bottom:3px}
+      .field input:not([type="checkbox"]){max-width:none}
+      .field-row{display:block}
+      .field-row .field{margin-top:6px}
+      .pot{margin-left:0}
+    }
     </style>
   </head>
   <body>
@@ -102,65 +96,80 @@ void handleRoot() {
     <div>System status: <span id="status">-</span></div>
     <div>Auto mode: <span id="auto">-</span></div>
     <div>Water interval (s): <span id="wint">-</span></div>
-    <div>Last auto watering (epoch s): <span id="last">-</span> ago</div>
+    <div>Data sync interval (s): <span id="dsint">-</span></div>
+    <div>Last data sync cycle: <span id="lastDataSync">-</span></div>
+    <div>Next data sync cycle: <span id="nextDataSync">-</span></div>
+    <div>Last auto watering: <span id="last">-</span></div>
     <div>
-      <button onclick="togglePump()">Toggle Pump 5s</button>
+      <button id="pumpBtn" onclick="togglePump()">Toggle Pump 5s</button>
     </div>
 
     <h3>Settings</h3>
-    <div>
-      <label>Name: <input id="name" maxlength="255"></label>
+    <div class="field long">
+      <label for="name">Name</label>
+      <input id="name" maxlength="255">
     </div>
-    <div>
-      <label>Current time (HH:MM): <input id="newTime" type="time"></label>
+    <div class="field short">
+      <label for="newTime">Current time (HH:MM)</label>
+      <input id="newTime" type="time">
     </div>
-    <div>
-      <label>Timezone offset (±HH:MM): <input id="tzOffset" placeholder="+01:00 or -05:30"></label>
+    <div class="field medium">
+      <label for="tzOffset">Timezone offset (±HH:MM)</label>
+      <input id="tzOffset" placeholder="+01:00 or -05:30">
     </div>
-    <div>
-      <label>Active start (HH:MM): <input id="activeStart" type="time"></label>
+    <div class="field short">
+      <label for="activeStart">Active start (HH:MM)</label>
+      <input id="activeStart" type="time">
     </div>
-    <div>
-      <label>Active end (HH:MM): <input id="activeEnd" type="time"></label>
+    <div class="field short">
+      <label for="activeEnd">Active end (HH:MM)</label>
+      <input id="activeEnd" type="time">
     </div>
-    <div>
+    <div class="actions">
       <button id="syncTimeBtn" onclick="syncTime()">Sync time (NTP)</button>
       <span id="syncStatus" style="margin-left:8px"></span>
     </div>
-    <div>
-      <label>Water interval (s): <input id="newWint" type="number" placeholder="60-2419200(28 days)" min="60" max="2419200"></label>
+    <div class="field medium">
+      <label for="newWint">Water interval (s)</label>
+      <input id="newWint" type="number" placeholder="60-2419200(28 days)" min="60" max="2419200">
     </div>
-    <div>
-      <label>Auto: <input id="newAuto" type="checkbox"></label>
+    <div class="field medium">
+      <label for="newDsint">Data sync interval (s)</label>
+      <input id="newDsint" type="number" placeholder="60-2419200(28 days)" min="60" max="2419200">
     </div>
-    <div>
+    <div class="field short">
+      <label for="newAuto">Auto</label>
+      <input id="newAuto" type="checkbox">
+    </div>
+    <div class="actions">
       <button id="applySettingsBtn" onclick="applySettings()">Apply Settings</button>
       <span id="settingsStatus" style="margin-left:8px"></span>
     </div>
-    <div>
+    <div class="actions">
       <button id="clearWifiBtn" onclick="clearWifiCredConfirm()">Clear WiFi Credentials</button>
       <button id="clearAllBtn" onclick="clearAllSettingsConfirm()" style="margin-left:8px">Reset All Settings</button>
       <span id="wifiStatus" style="margin-left:8px"></span>
       <span id="resetStatus" style="margin-left:8px"></span>
     </div>
 
-    <h3 style="margin-top:14px">Workers</h3>
+    <h3>Workers</h3>
     <div>
       <form id="addForm" onsubmit="return false;">
-          <label>MAC (hex): <input id="wmac" placeholder="AABBCCDDEEFF"></label>
-          <label>Name: <input id="wname" maxlength="31" placeholder="Worker name(31 characters max)" style="width:140px"></label>
+          <div class="field medium"><label for="wmac">MAC (hex)</label><input id="wmac" placeholder="AABBCCDDEEFF"></div>
+          <div class="field long"><label for="wname">Name</label><input id="wname" maxlength="64" placeholder="Worker name (64 UTF-8 bytes max)" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji."></div>
           <!-- Threshold and duration removed from quick add; defaults used -->
-        <button onclick="addWorker()">Add Worker</button>
+        <div class="actions"><button onclick="addWorker()">Add Worker</button></div>
       </form>
     </div>
+    <h3>Worker list</h3>
     <div style="margin-top:8px">
-      <div style="margin-bottom:6px">
+      <div class="actions">
         <button id="applyAllBtn" onclick="applyAll()" disabled>Apply All</button>
       </div>
-      <div id="workersList"></div>
+      <div id="workersList">Loading...</div>
     </div>
 
-    <div style="margin-top:18px;">
+    <div id="diagnosticsSection" style="margin-top:18px;">
       <h3>Diagnostics</h3>
       <table id="diagTable"><tr><th>Metric</th><th>Value</th></tr></table>
     </div>
@@ -168,6 +177,44 @@ void handleRoot() {
     <script>
     const dirty = new Set();
     const pending = new Set();
+    const NAME_MAX_BYTES = 64;
+    const utf8Encoder = new TextEncoder();
+    const urlParams = new URLSearchParams(window.location.search);
+    const debugMode = urlParams.get('debug') === 'true';
+    let autoMode = false;
+    let settingsInputsLoaded = false;
+
+    function clampUtf8Value(value, maxBytes) {
+      if (utf8Encoder.encode(value).length <= maxBytes) return value;
+      let out = '';
+      for (const ch of value) {
+        if (utf8Encoder.encode(out + ch).length > maxBytes) break;
+        out += ch;
+      }
+      return out;
+    }
+
+    function sanitizeNameInput(input) {
+      if (!input) return '';
+      const clamped = clampUtf8Value(input.value || '', NAME_MAX_BYTES);
+      if (input.value !== clamped) input.value = clamped;
+      return clamped;
+    }
+
+    function setWaterButtonBlocked(button, blocked) {
+      if (!button) return;
+      button.dataset.manualBlocked = blocked ? '1' : '0';
+      button.disabled = autoMode || blocked;
+    }
+
+    function updateManualControls() {
+      const pumpBtn = document.getElementById('pumpBtn');
+      if (pumpBtn) pumpBtn.disabled = autoMode;
+      document.querySelectorAll('.waterBtn').forEach(btn => {
+        const blocked = btn.dataset.manualBlocked === '1';
+        btn.disabled = autoMode || blocked;
+      });
+    }
 
     function markDirty(id) {
       dirty.add(id);
@@ -184,11 +231,45 @@ void handleRoot() {
       document.getElementById('applyAllBtn').disabled = dirty.size === 0 || pending.size > 0;
     }
 
+    // Global status timers and setter so other functions can display transient status messages.
+    const statusTimers = {};
+    function setStatus(id, msg, ok) {
+      // Try pot/node-level status first
+      const nodeEl = document.querySelector(`.node[data-id="${id}"]`);
+      if (nodeEl) {
+        const span = nodeEl.querySelector('.status');
+        if (!span) return;
+        span.innerText = msg || '';
+        span.style.color = ok ? 'green' : 'crimson';
+        if (statusTimers[id]) clearTimeout(statusTimers[id]);
+        if (msg) statusTimers[id] = setTimeout(()=>{ span.innerText=''; delete statusTimers[id]; }, 3000);
+        return;
+      }
+      // Fallback: worker-level status (id like MAC-all)
+      if (typeof id === 'string' && id.endsWith('-all')) {
+        const mac = id.slice(0, -4);
+        const workerDiv = document.querySelector(`.worker[data-mac="${mac}"]`);
+        if (!workerDiv) return;
+        let wstatus = workerDiv.querySelector('.wstatus');
+        if (!wstatus) {
+          wstatus = document.createElement('span');
+          wstatus.className = 'wstatus';
+          wstatus.style.marginLeft = '8px';
+          const headerDiv = workerDiv.querySelector('div');
+          if (headerDiv) headerDiv.appendChild(wstatus);
+        }
+        wstatus.innerText = msg || '';
+        wstatus.style.color = ok ? 'green' : 'crimson';
+        if (statusTimers[id]) clearTimeout(statusTimers[id]);
+        if (msg) statusTimers[id] = setTimeout(()=>{ wstatus.innerText=''; delete statusTimers[id]; }, 3000);
+      }
+    }
+
     function getNodePayloadEl(el){
       return {
         mac: el.dataset.mac,
         potIndex: parseInt(el.dataset.pi) || 0,
-        name: el.querySelector('.iname').value.trim(),
+        name: sanitizeNameInput(el.querySelector('.iname')),
         threshold: parseInt(el.querySelector('.ith').value) || 2000,
         duration: parseInt(el.querySelector('.idur').value) || 5
       };
@@ -218,58 +299,67 @@ void handleRoot() {
       if (ids.length===0) return;
       // apply sequentially to avoid flooding
       for (let i=0;i<ids.length;i++){
-        const el = document.querySelector(`.node[data-id="${ids[i]}"]`);
-        if (el) await applyNode(el);
+        if (ids[i].endsWith('-worker')) {
+          const mac = ids[i].slice(0, -7);
+          const wel = document.querySelector(`.worker[data-mac="${mac}"]`);
+          if (wel) await applyWorker(wel);
+        } else {
+          const el = document.querySelector(`.node[data-id="${ids[i]}"]`);
+          if (el) await applyNode(el);
+        }
       }
-      // refresh list after
-      setTimeout(refreshWorkers,300);
+      // refresh list after (full rebuild to capture input changes)
+      setTimeout(refreshWorkersFull,300);
     }
 
-    async function refreshWorkers(){
+    async function applyWorker(wel){
+      const mac = wel.dataset.mac;
+      const id = mac + '-worker';
+      if (pending.has(id)) return;
+      pending.add(id); updateButtons();
+      const payload = { mac: mac, workerName: sanitizeNameInput(wel.querySelector('.wname')) };
+      try {
+        const res = await fetch('/worker/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+        if (!res.ok) throw new Error(await res.text());
+        dirty.delete(id);
+        setStatus(mac+'-all', 'Saved', true);
+      } catch (e) {
+        console.error('applyWorker', mac, e);
+        setStatus(mac+'-all', 'Save failed', false);
+      } finally {
+        pending.delete(id); updateButtons();
+      }
+    }
+
+    // Full rebuild of worker list including inputs and event bindings.
+    async function refreshWorkersFull(){
       let r = await fetch('/nodes');
       let list = await r.json();
       let container = document.getElementById('workersList');
       container.innerHTML = '';
-      const statusTimers = {};
 
-      function setStatus(id, msg, ok) {
-        const el = document.querySelector(`.node[data-id="${id}"]`);
-        if (!el) return;
-        const span = el.querySelector('.status');
-        span.innerText = msg || '';
-        span.style.color = ok ? 'green' : 'crimson';
-        if (statusTimers[id]) clearTimeout(statusTimers[id]);
-        if (msg) statusTimers[id] = setTimeout(()=>{ span.innerText=''; delete statusTimers[id]; }, 3000);
-      }
+      const workers = list.map(w => ({
+        mac: w.mac,
+        workerName: w.workerName || '',
+        battery: w.battery ?? null,
+        batteryMv: w.batteryMv ?? null,
+        lastSyncAgo: w.lastSyncAgo ?? null,
+        rssi: w.rssi ?? null,
+        nodePotCount: w.nodePotCount,
+        pots: (w.pots || []).map(p => ({ potIndex: (typeof p.index === 'number' ? p.index : 0), name: p.name, threshold: p.threshold, duration: p.duration, soil: p.soil, soilRaw: p.soilRaw ?? null, lastWaterAgo: p.lastWaterAgo ?? null }))
+      }));
+      workers.forEach(w => w.pots.sort((a,b)=> (a.potIndex - b.potIndex)));
 
-      function fmtTime(v){
-        if (v===null || v===undefined) return '-';
-        return formatEpoch(v);
-      }
-
-      // Group returned flat config list by MAC
-      const map = {};
-      for (let i=0;i<list.length;i++){
-        const w = list[i];
-        if (!map[w.mac]) map[w.mac] = { mac: w.mac, battery: null, lastSync: null, lastWater: null, nodePotCount: w.nodePotCount, pots: [] };
-        // update worker-level info if available
-        if (w.battery !== null && map[w.mac].battery === null) map[w.mac].battery = w.battery;
-        if (w.lastSync !== null && map[w.mac].lastSync === null) map[w.mac].lastSync = w.lastSync;
-        if (w.lastWater !== null && map[w.mac].lastWater === null) map[w.mac].lastWater = w.lastWater;
-        if (w.nodePotCount !== undefined) map[w.mac].nodePotCount = w.nodePotCount;
-        // collect per-pot config
-        map[w.mac].pots.push({ potIndex: (typeof w.potIndex === 'number' ? w.potIndex : 0), name: w.name, threshold: w.threshold, duration: w.duration, soil: w.soil });
-      }
-
-      // sort pot lists by potIndex for deterministic ordering
-      for (const m in map) {
-        map[m].pots.sort((a,b)=> (a.potIndex - b.potIndex));
+      if (workers.length === 0) {
+        container.innerText = 'No workers configured';
+        updateManualControls();
+        updateButtons();
+        return;
       }
 
       let idx = 0;
-      for (const mac in map) {
+      for (const worker of workers) {
         idx++;
-        const worker = map[mac];
         // worker header
         const workerDiv = document.createElement('div');
         workerDiv.className = 'worker';
@@ -277,32 +367,38 @@ void handleRoot() {
         workerDiv.style.padding = '6px 0';
         workerDiv.innerHTML = `
           <hr>
-          <div><strong>${idx}. ${mac}</strong></div>
-          <div>
-            <label>Worker name: <input class="wname" value="${escapeHtml(worker.pots[0] ? worker.pots[0].name : '')}" maxlength="31" style="width:160px"></label>
-            <span style="margin-left:8px;color:#666">Battery: ${worker.battery===null?'-':worker.battery} LastSync: ${fmtTime(worker.lastSync)}</span>
-            <button class="applyWorkerBtn" style="margin-left:8px">Apply</button>
-            <button class="removeAllBtn" style="margin-left:8px">Remove</button>
+          <div><strong>${idx}. ${worker.mac}</strong></div>
+          <div class="field long">
+            <label for="workerName-${worker.mac}">Worker name</label>
+            <input id="workerName-${worker.mac}" class="wname" value="${escapeHtml(worker.workerName)}" maxlength="64" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji.">
+          </div>
+          <div class="wmeta meta">${formatBattery(worker)} Last Sync: ${formatRelativeAge(worker.lastSyncAgo)} RSSI: ${worker.rssi===null?'-':(worker.rssi + 'dBm')}</div>
+          <div class="actions">
+            <button class="applyWorkerBtn">Apply</button>
+            <button class="removeAllBtn">Remove</button>
           </div>
         `;
         container.appendChild(workerDiv);
         // bind apply for this worker (apply all dirty pots for the worker)
         const applyWorkerBtn = workerDiv.querySelector('.applyWorkerBtn');
+        const workerNameInput = workerDiv.querySelector('.wname');
+        workerNameInput.addEventListener('input', ()=> { sanitizeNameInput(workerNameInput); markDirty(worker.mac + '-worker'); });
         applyWorkerBtn.addEventListener('click', async ()=>{
           if (pending.size) return;
+          if (dirty.has(worker.mac + '-worker')) await applyWorker(workerDiv);
           const nodes = workerDiv.querySelectorAll('.node');
           for (let i=0;i<nodes.length;i++){
             const el = nodes[i];
             if (dirty.has(el.dataset.id)) await applyNode(el);
           }
-          setTimeout(refreshWorkers,300);
+          setTimeout(refreshWorkersFull,300);
         });
         // bind remove all
         const removeAllBtn = workerDiv.querySelector('.removeAllBtn');
         removeAllBtn.addEventListener('click', async ()=> {
-          setStatus(mac+'-all', 'Removing...', false);
-          const ok = await removeWorker(mac);
-          if (ok) { setStatus(mac+'-all', 'Removed', true); setTimeout(refreshWorkers,300); } else setStatus(mac+'-all', 'Remove failed', false);
+          setStatus(worker.mac+'-all', 'Removing...', false);
+          const ok = await removeWorker(worker.mac);
+          if (ok) { setStatus(worker.mac+'-all', 'Removed', true); setTimeout(refreshWorkersFull,300); } else setStatus(worker.mac+'-all', 'Remove failed', false);
         });
 
         // render pots (ordered by potIndex)
@@ -321,66 +417,179 @@ void handleRoot() {
             div.dataset.id = id;
             div.style.padding = '6px 6px';
             div.innerHTML = `
-              <div><strong>Pot ${pot.potIndex+1}</strong> <label style="margin-left:8px">Name: <input class="iname" value="${escapeHtml(pot.name||'')}" maxlength="31" style="width:160px"></label>
-                <label style="margin-left:8px">Threshold: <input class="ith" type="number" value="${pot.threshold}" min="0" max="4095" style="width:90px"></label>
-                <label style="margin-left:8px">Duration(s): <input class="idur" type="number" value="${pot.duration}" min="1" max="60" style="width:80px"></label>
+              <div><strong>Pot ${pot.potIndex+1}</strong></div>
+              <div class="field-row">
+                <div class="field long compact">
+                  <label for="potName-${id}">Name</label>
+                  <input id="potName-${id}" class="iname" value="${escapeHtml(pot.name||'')}" maxlength="64" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji.">
+                </div>
+                <div class="field short compact">
+                  <label for="potThreshold-${id}">Threshold</label>
+                  <input id="potThreshold-${id}" class="ith" type="number" value="${pot.threshold}" min="0" max="4095">
+                </div>
+                <div class="field short compact">
+                  <label for="potDuration-${id}">Duration(s)</label>
+                  <input id="potDuration-${id}" class="idur" type="number" value="${pot.duration}" min="1" max="60">
+                </div>
               </div>
-              <div>
-                <button class="waterBtn">Water</button>
-                <span class="status" style="margin-left:8px"></span>
-                <span class="soil" style="margin-left:8px;color:#666">Soil: ${pot.soil===null?'-':pot.soil}</span>
-                <span class="lastwater" style="margin-left:8px;color:#666">LastWater: ${fmtTime(pot.lastWater)}</span>
-              </div>
+                <div class="meta">
+                  <span class="soil">${formatSoil(pot)}</span>
+                  <span class="lastwater" style="margin-left:8px">Last Water: ${formatRelativeAge(pot.lastWaterAgo)}</span>
+                </div>
+                <div class="actions">
+                  <button class="waterBtn" disabled>Water</button>
+                  <span class="status" style="margin-left:8px"></span>
+                </div>
             `;
             const iname = div.querySelector('.iname');
             const ith = div.querySelector('.ith');
             const idur = div.querySelector('.idur');
-            iname.addEventListener('input', ()=> markDirty(id));
+            iname.addEventListener('input', ()=> { sanitizeNameInput(iname); markDirty(id); });
             ith.addEventListener('input', ()=> markDirty(id));
             idur.addEventListener('input', ()=> markDirty(id));
             const waterBtn = div.querySelector('.waterBtn');
-            // display sensor status and disable water button if sensor not connected (soil < 50)
+            // display sensor status and disable water button if sensor not connected or worker not synced
             const soilSpan = div.querySelector('.soil');
             const lastSpan = div.querySelector('.lastwater');
-            if (pot.soil !== null && pot.soil < 50) {
-              soilSpan.innerText = 'Sensor not connected';
-              if (waterBtn) waterBtn.disabled = true;
+            const synced = worker.lastSyncAgo != null;
+            if (isSoilDisconnected(pot)) {
+              soilSpan.innerText = formatSoil(pot);
+              setWaterButtonBlocked(waterBtn, true);
             } else {
-              soilSpan.innerText = (pot.soil===null?'-':pot.soil);
-              if (waterBtn) waterBtn.disabled = false;
+              soilSpan.innerText = formatSoil(pot);
+              setWaterButtonBlocked(waterBtn, !synced);
             }
-            if (lastSpan) lastSpan.innerText = 'LastWater: ' + fmtTime(pot.lastWater);
+            if (lastSpan) lastSpan.innerText = 'Last Water: ' + formatRelativeAge(pot.lastWaterAgo);
             waterBtn.addEventListener('click', async ()=> { setStatus(id, 'Sending...', false); const dur = parseInt(idur.value) || pot.duration; const ok = await waterWorker(div.dataset.mac, parseInt(div.dataset.pi), dur); if (ok) setStatus(id, 'Water sent', true); else setStatus(id, 'Send failed', false); });
             workerDiv.appendChild(div);
           }
         }
       }
+      updateManualControls();
       updateButtons();
+    }
+
+    // Partial refresh: only update non-input information (battery, last sync, rssi, soil, last water)
+    async function refreshWorkersPartial(){
+      try {
+        let r = await fetch('/nodes');
+        let list = await r.json();
+        // Group by MAC like full
+        const workers = list.map(w => ({
+          mac: w.mac,
+          battery: w.battery ?? null,
+          batteryMv: w.batteryMv ?? null,
+          lastSyncAgo: w.lastSyncAgo ?? null,
+          rssi: w.rssi ?? null,
+          pots: (w.pots || []).map(p => ({ potIndex: (typeof p.index === 'number' ? p.index : 0), soil: p.soil, soilRaw: p.soilRaw ?? null, lastWaterAgo: p.lastWaterAgo ?? null }))
+        }));
+        workers.forEach(w => w.pots.sort((a,b)=> (a.potIndex - b.potIndex)));
+
+        for (const worker of workers) {
+          const workerDiv = document.querySelector(`.worker[data-mac="${worker.mac}"]`);
+          if (!workerDiv) continue; // skip workers not present in DOM (added/removed -> full refresh will handle)
+          // update header meta
+          const winfo = workerDiv.querySelector('.wmeta');
+          if (winfo) {
+            winfo.innerText = `${formatBattery(worker)} Last Sync: ${formatRelativeAge(worker.lastSyncAgo)} RSSI: ${worker.rssi===null?'-':(worker.rssi + 'dBm')}`;
+          }
+          // update pots
+          for (let pi=0; pi<worker.pots.length; ++pi) {
+            const pot = worker.pots[pi];
+            const node = workerDiv.querySelector(`.node[data-pi="${pot.potIndex}"]`);
+            if (!node) continue;
+            const soilSpan = node.querySelector('.soil');
+            const lastSpan = node.querySelector('.lastwater');
+            const waterBtn = node.querySelector('.waterBtn');
+            const synced = worker.lastSyncAgo != null;
+            if (soilSpan) {
+              soilSpan.innerText = formatSoil(pot);
+            }
+            if (lastSpan) lastSpan.innerText = 'Last Water: ' + formatRelativeAge(pot.lastWaterAgo);
+            setWaterButtonBlocked(waterBtn, (isSoilDisconnected(pot) || !synced));
+          }
+        }
+        updateManualControls();
+        updateButtons();
+      } catch (e) { console.error('refreshWorkersPartial', e); }
     }
 
     function escapeHtml(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-    function formatEpoch(epoch){
-      if (!epoch || epoch===null || epoch===undefined) return '-';
-      try {
-        // epoch is seconds; show relative if within a day, otherwise ISO date
-        const now = Math.floor(Date.now()/1000);
-        const d = now - epoch;
-        if (d < 0) return 'in future';
-        if (d < 60) return d + 's ago';
-        if (d < 3600) return Math.floor(d/60) + 'm ago';
-        if (d < 86400) return Math.floor(d/3600) + 'h ago';
-        const dt = new Date(epoch*1000);
-        return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0')+' '+String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');
-      } catch(e){ return String(epoch); }
+    function finiteNumber(value) {
+      return typeof value === 'number' && Number.isFinite(value);
+    }
+
+    function formatBattery(worker) {
+      if (!worker || !finiteNumber(worker.battery)) return 'Battery: -';
+      let text = 'Battery: ' + worker.battery + '%';
+      if (debugMode && finiteNumber(worker.batteryMv)) text += ' (' + worker.batteryMv + ' mV)';
+      return text;
+    }
+
+    function isSoilDisconnected(pot) {
+      return pot && finiteNumber(pot.soilRaw) && pot.soilRaw < 50;
+    }
+
+    function formatSoil(pot) {
+      if (isSoilDisconnected(pot)) {
+        let text = 'Soil Moisture: Sensor not connected';
+        if (debugMode && finiteNumber(pot.soilRaw)) text += ' (raw ' + pot.soilRaw + ')';
+        return text;
+      }
+      let text = 'Soil Moisture: ' + (pot && finiteNumber(pot.soil) ? pot.soil : '-');
+      if (debugMode && pot && finiteNumber(pot.soilRaw)) text += ' (raw ' + pot.soilRaw + ')';
+      return text;
+    }
+
+    function formatRelativeAge(ageSeconds){
+      if (typeof ageSeconds !== 'number' || !Number.isFinite(ageSeconds) || ageSeconds < 0) return '-';
+      const seconds = Math.floor(ageSeconds);
+      let value;
+      let unit;
+      if (seconds < 60) {
+        value = seconds;
+        unit = 'second';
+      } else if (seconds < 3600) {
+        value = Math.floor(seconds / 60);
+        unit = 'minute';
+      } else if (seconds < 86400) {
+        value = Math.floor(seconds / 3600);
+        unit = 'hour';
+      } else {
+        value = Math.floor(seconds / 86400);
+        unit = 'day';
+      }
+      return value + ' ' + unit + (value === 1 ? '' : 's') + ' ago';
+    }
+
+    function formatRelativeFuture(secondsUntil){
+      if (typeof secondsUntil !== 'number' || !Number.isFinite(secondsUntil) || secondsUntil < 0) return '-';
+      const seconds = Math.floor(secondsUntil);
+      let value;
+      let unit;
+      if (seconds < 60) {
+        value = seconds;
+        unit = 'second';
+      } else if (seconds < 3600) {
+        value = Math.floor(seconds / 60);
+        unit = 'minute';
+      } else if (seconds < 86400) {
+        value = Math.floor(seconds / 3600);
+        unit = 'hour';
+      } else {
+        value = Math.floor(seconds / 86400);
+        unit = 'day';
+      }
+      return 'in ' + value + ' ' + unit + (value === 1 ? '' : 's');
     }
 
     async function addWorker(){
       const mac = document.getElementById('wmac').value.trim();
-      const name = document.getElementById('wname').value.trim();
-      const body = {mac:mac, name:name};
+      const name = sanitizeNameInput(document.getElementById('wname'));
+      const body = {mac:mac, workerName:name};
       await fetch('/worker/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-      setTimeout(refreshWorkers,300);
+      setTimeout(refreshWorkersFull,300);
     }
 
     async function removeWorker(mac, potIndex){
@@ -388,7 +597,7 @@ void handleRoot() {
         const body = {mac:mac};
         const res = await fetch('/worker/remove',{method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
         const ok = res.ok;
-        if (ok) setTimeout(refreshWorkers,300);
+        if (ok) setTimeout(refreshWorkersFull,300);
         return ok;
       } catch (e) { return false; }
     }
@@ -410,7 +619,12 @@ void handleRoot() {
       const status = document.getElementById('settingsStatus');
       const timeVal = (document.getElementById('newTime').value || '').trim();
       const tzVal = (document.getElementById('tzOffset').value || '').trim();
-      const body = {name:document.getElementById('name').value, auto:document.getElementById('newAuto').checked, wint:parseInt(document.getElementById('newWint').value)};
+      const body = {
+        name:document.getElementById('name').value,
+        auto:document.getElementById('newAuto').checked,
+        wint:parseInt(document.getElementById('newWint').value),
+        dsint:parseInt(document.getElementById('newDsint').value)
+      };
       if (timeVal) body.newTime = timeVal;
       if (tzVal) body.tzOffset = tzVal;
       // active window inputs (HH:MM -> seconds since midnight)
@@ -428,6 +642,7 @@ void handleRoot() {
         const res = await fetch('/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
         if (!res.ok) throw new Error(await res.text());
         status.innerText = 'Saved'; status.style.color = 'green';
+        settingsInputsLoaded = false;
         setTimeout(fetchStatus,300);
       } catch (e) {
         status.innerText = 'Save failed'; status.style.color = 'crimson';
@@ -489,7 +704,7 @@ void handleRoot() {
         if (!res.ok) throw new Error(await res.text());
         status.innerText = 'Reset'; status.style.color = 'green';
         setTimeout(fetchStatus, 300);
-        setTimeout(refreshWorkers, 300);
+        setTimeout(refreshWorkersFull, 300);
       } catch (e) {
         status.innerText = 'Reset failed'; status.style.color = 'crimson';
       } finally {
@@ -506,7 +721,14 @@ void handleRoot() {
       tbl.innerHTML = `
         <tr><th>Metric</th><th>Value</th></tr>
         <tr><td>Free Heap (KiB)</td><td>${fmtKb(j.freeHeap)}</td></tr>
+        <tr><td>Minimum Free Heap (KiB)</td><td>${fmtKb(j.minFreeHeap)}</td></tr>
+        <tr><td>Largest Free Block (KiB)</td><td>${fmtKb(j.largestFreeBlock)}</td></tr>
         <tr><td>Total Heap (KiB)</td><td>${fmtKb(j.heapSize)}</td></tr>
+        <tr><td>Loop Stack Minimum Free (bytes)</td><td>${fmt(j.loopStackMinFree)}</td></tr>
+        <tr><td>Web Stack Minimum Free (bytes)</td><td>${fmt(j.webStackMinFree)}</td></tr>
+        <tr><td>Sensor Stack Minimum Free (bytes)</td><td>${fmt(j.sensorStackMinFree)}</td></tr>
+        <tr><td>Watering Stack Minimum Free (bytes)</td><td>${fmt(j.wateringStackMinFree)}</td></tr>
+        <tr><td>Bluetooth TX Stack Minimum Free (bytes)</td><td>${fmt(j.btSenderStackMinFree)}</td></tr>
         <tr><td>Free Sketch Space (KiB)</td><td>${fmtKb(j.freeSketchSpace)}</td></tr>
         <tr><td>Sketch Size (KiB)</td><td>${fmtKb(j.sketchSize)}</td></tr>
         <tr><td>Flash Chip Size (KiB)</td><td>${fmtKb(j.flashChipSize)}</td></tr>
@@ -515,6 +737,17 @@ void handleRoot() {
         <tr><td>NVS total entries</td><td>${fmt(j.nvs_total_entries)}</td></tr>
         <tr><td>WiFi RSSI (dBm)</td><td>${fmt(j.rssi)}</td></tr>
       `;
+    }
+
+    async function fetchDiagnostics(){
+      if (!debugMode) return;
+      try {
+        const r = await fetch('/diagnostics');
+        const j = await r.json();
+        renderDiagnostics(j);
+      } catch (e) {
+        console.error('fetchDiagnostics', e);
+      }
     }
 
     async function fetchStatus(){
@@ -533,24 +766,38 @@ void handleRoot() {
           tankEl.innerText = ttext;
         }
 
-        if (typeof j.timeOfDaySec === 'number') {
+        if (j.clockValid && typeof j.timeOfDaySec === 'number') {
           const hh = Math.floor(j.timeOfDaySec/3600)%24;
           const mm = Math.floor((j.timeOfDaySec%3600)/60);
           const s = String(hh).padStart(2,'0')+':' + String(mm).padStart(2,'0');
           const timeSpan = document.getElementById('time');
           if (timeSpan) timeSpan.innerText = s;
+        } else {
+          const timeSpan = document.getElementById('time');
+          if (timeSpan) timeSpan.innerText = 'Invalid';
         }
 
         const autoSpan = document.getElementById('auto');
-        if (autoSpan) autoSpan.innerText = j.auto ? "On" : "Off";
+        autoMode = !!j.auto;
+        if (autoSpan) autoSpan.innerText = autoMode ? "On" : "Off";
 
         const wintSpan = document.getElementById('wint');
         if (wintSpan) wintSpan.innerText = j.waterInterval || 3600;
+        const dsintSpan = document.getElementById('dsint');
+        if (dsintSpan) dsintSpan.innerText = j.dataSyncInterval || 3600;
+        const lastDataSyncSpan = document.getElementById('lastDataSync');
+        if (lastDataSyncSpan) lastDataSyncSpan.innerText = formatRelativeAge(j.lastDataSyncAgo);
+        const nextDataSyncSpan = document.getElementById('nextDataSync');
+        if (nextDataSyncSpan) nextDataSyncSpan.innerText = formatRelativeFuture(j.nextDataSyncIn);
+        const statusSpan = document.getElementById('status');
+        if (statusSpan) statusSpan.innerText = j.state || '-';
+        const lastSpan = document.getElementById('last');
+        if (lastSpan) lastSpan.innerText = formatRelativeAge(j.lastAutoWateringAgo);
 
         const title = document.getElementById('title');
         if (title) title.innerText = 'Plant Watering ' + (j.name?('(' + j.name + ')'):"" );
 
-        // populate timezone display (do NOT overwrite tzOffset input) and active window inputs
+        // populate timezone display every refresh, but editable settings inputs only on page load
         try {
           if (typeof j.tzOffsetMinutes === 'number') {
             const tzSpan = document.getElementById('timezone');
@@ -563,45 +810,190 @@ void handleRoot() {
               tzSpan.innerText = sign + hh + ':' + mm;
             }
           }
-          // populate active window inputs if available and not focused
-          try {
-            if (typeof j.activeStart === 'number') {
-              const s = j.activeStart;
-              const hh = Math.floor(s/3600)%24;
-              const mm = Math.floor((s%3600)/60);
-              const el = document.getElementById('activeStart');
-              if (el && document.activeElement !== el) el.value = String(hh).padStart(2,'0')+':' + String(mm).padStart(2,'0');
-            }
-            if (typeof j.activeEnd === 'number') {
-              const s = j.activeEnd;
-              const hh = Math.floor(s/3600)%24;
-              const mm = Math.floor((s%3600)/60);
-              const el = document.getElementById('activeEnd');
-              if (el && document.activeElement !== el) el.value = String(hh).padStart(2,'0')+':' + String(mm).padStart(2,'0');
-            }
-          } catch(e) {}
+          if (!settingsInputsLoaded) populateSettingsInputs(j);
         } catch(e) {}
 
-        renderDiagnostics(j);
+        updateManualControls();
       } catch (e) {
         console.error('fetchStatus', e);
       }
     }
 
+    function formatTimeInput(secondsOfDay){
+      const s = secondsOfDay || 0;
+      const hh = Math.floor(s/3600)%24;
+      const mm = Math.floor((s%3600)/60);
+      return String(hh).padStart(2,'0')+':' + String(mm).padStart(2,'0');
+    }
+
+    function populateSettingsInputs(j){
+      const nameInput = document.getElementById('name');
+      if (nameInput) nameInput.value = j.name || '';
+      const autoInput = document.getElementById('newAuto');
+      if (autoInput) autoInput.checked = !!j.auto;
+      if (typeof j.activeStart === 'number') {
+        const el = document.getElementById('activeStart');
+        if (el) el.value = formatTimeInput(j.activeStart);
+      }
+      if (typeof j.activeEnd === 'number') {
+        const el = document.getElementById('activeEnd');
+        if (el) el.value = formatTimeInput(j.activeEnd);
+      }
+      if (typeof j.waterInterval === 'number') {
+        const el = document.getElementById('newWint');
+        if (el) el.value = j.waterInterval;
+      }
+      if (typeof j.dataSyncInterval === 'number') {
+        const el = document.getElementById('newDsint');
+        if (el) el.value = j.dataSyncInterval;
+      }
+      settingsInputsLoaded = true;
+    }
+
     // Poll less frequently to reduce CPU/network and avoid clobbering user inputs
+    const diagnosticsSection = document.getElementById('diagnosticsSection');
+    if (diagnosticsSection) diagnosticsSection.style.display = debugMode ? '' : 'none';
+    const addWorkerNameInput = document.getElementById('wname');
+    if (addWorkerNameInput) addWorkerNameInput.addEventListener('input', ()=> sanitizeNameInput(addWorkerNameInput));
     setInterval(fetchStatus,3000);
-    setInterval(refreshWorkers,5000);
+    setInterval(refreshWorkersPartial,5000);
     fetchStatus();
-    refreshWorkers();
+    if (debugMode) {
+      setInterval(fetchDiagnostics,10000);
+      fetchDiagnostics();
+    }
+    // initial full worker list render
+    refreshWorkersFull();
     </script>
   </body>
   </html>
   )rawliteral";
-  server.send(200, "text/html", html);
+  
+  // strlen on a string literal: computed once, cached.
+  // Even better: declare html as const char html[] = R"(...)" 
+  // and use sizeof(html)-1 for a compile-time constant.
+  static const size_t htmlLen = strlen(html);
+
+  // Send headers only — setContentLength ensures the correct
+  // Content-Length header is written despite the empty body string.
+  server.setContentLength(htmlLen);
+  server.send(200, "text/html", ""); // headers sent, zero body bytes
+
+  // Write body directly to TCP socket in MTU-sized chunks.
+  // WiFiClient::write(const uint8_t*, size_t) has no String conversion.
+  WiFiClient client = server.client();
+  const uint8_t* data = (const uint8_t*)html;
+  size_t remaining = htmlLen;
+  while (remaining > 0) {
+      size_t chunk = min(remaining, (size_t)1460); // ~1 TCP segment (MTU - headers)
+      size_t written = client.write(data, chunk);
+      if (written == 0) break; // client disconnected mid-transfer
+      data += written;
+      remaining -= written;
+  }
 }
 
 void handleStatus() {
-  server.send(200, "application/json", makeStatusJson());
+  int tank = getTankLevel();
+  unsigned long now = millis()/1000;
+  uint32_t tod = getCurrentTimeOfDaySec();
+  Settings settings{};
+  RuntimeSnapshot runtime{};
+  getSettingsSnapshot(settings);
+  getRuntimeSnapshot(runtime);
+  JsonDocument doc;
+  doc["name"] = settings.name;
+  doc["auto"] = runtime.autoEnabled;
+  doc["tank"] = tank;
+  doc["now"] = now;
+  doc["timeOfDaySec"] = tod;
+  doc["waterInterval"] = settings.waterInterval;
+  doc["dataSyncInterval"] = settings.dataSyncInterval;
+  doc["tzOffsetMinutes"] = settings.tzOffsetMinutes;
+  doc["activeStart"] = settings.activeStart;
+  doc["activeEnd"] = settings.activeEnd;
+  doc["state"] = stateToString(runtime.state);
+  doc["clockValid"] = isClockValid();
+  int64_t nowUs = esp_timer_get_time();
+  if (runtime.autoEnabled && runtime.lastDataSyncUs != 0 &&
+      nowUs >= runtime.lastDataSyncUs) {
+    doc["lastDataSyncAgo"] =
+        static_cast<uint64_t>((nowUs - runtime.lastDataSyncUs) / 1000000LL);
+  } else {
+    doc["lastDataSyncAgo"] = nullptr;
+  }
+  if (runtime.autoEnabled && runtime.nextDataSyncUs != 0 &&
+      runtime.nextDataSyncUs >= nowUs) {
+    doc["nextDataSyncIn"] =
+        static_cast<uint64_t>((runtime.nextDataSyncUs - nowUs) / 1000000LL);
+  } else {
+    doc["nextDataSyncIn"] = nullptr;
+  }
+  uint64_t curEpoch = getCurrentEpochSec();
+  if (curEpoch) doc["epoch"] = curEpoch;
+  if (settings.lastWateringUtcSec != 0 &&
+      curEpoch >= settings.lastWateringUtcSec) {
+    doc["lastAutoWateringAgo"] = curEpoch - settings.lastWateringUtcSec;
+  } else {
+    doc["lastAutoWateringAgo"] = nullptr;
+  }
+
+  server.setContentLength(measureJson(doc));
+  server.send(200, "application/json", "");
+  WiFiClient client = server.client();
+  serializeJson(doc, client); // Streams directly to the network buffer
+}
+
+void handleDiagnostics() {
+  JsonDocument doc;
+  uint32_t freeHeap = ESP.getFreeHeap();
+  uint32_t minFreeHeap = ESP.getMinFreeHeap();
+  uint32_t largestFreeBlock = ESP.getMaxAllocHeap();
+  uint32_t heapSize = ESP.getHeapSize();
+  uint32_t freeSketch = ESP.getFreeSketchSpace();
+  uint32_t sketchSize = ESP.getSketchSize();
+  uint32_t flashChipSize = ESP.getFlashChipSize();
+  uint32_t chipRev = ESP.getChipRevision();
+  doc["freeHeap"] = freeHeap;
+  doc["minFreeHeap"] = minFreeHeap;
+  doc["largestFreeBlock"] = largestFreeBlock;
+  doc["heapSize"] = heapSize;
+  doc["freeSketchSpace"] = freeSketch;
+  doc["sketchSize"] = sketchSize;
+  doc["flashChipSize"] = flashChipSize;
+  doc["chipRevision"] = chipRev;
+
+  auto addStackHighWaterMark = [&doc](const char* name, TaskHandle_t task) {
+    if (task) doc[name] = uxTaskGetStackHighWaterMark(task);
+    else doc[name] = nullptr;
+  };
+  addStackHighWaterMark("loopStackMinFree", sLoopTask);
+  addStackHighWaterMark("webStackMinFree", sWebTask);
+  addStackHighWaterMark("sensorStackMinFree", sSensorTask);
+  addStackHighWaterMark("wateringStackMinFree", sWateringTask);
+  UBaseType_t btSenderStackMinFree = 0;
+  if (BT_TLV::btCommonGetSenderStackHighWaterMark(btSenderStackMinFree)) {
+    doc["btSenderStackMinFree"] = btSenderStackMinFree;
+  } else {
+    doc["btSenderStackMinFree"] = nullptr;
+  }
+  // NVS stats (may fail if NVS not initialized)
+  nvs_stats_t nvs_stats; // from nvs_flash.h
+  if (nvs_get_stats(NULL, &nvs_stats) == ESP_OK) {
+    doc["nvs_entries"] = (uint32_t)nvs_stats.used_entries;
+    doc["nvs_total_entries"] = (uint32_t)nvs_stats.total_entries;
+  } else {
+    doc["nvs_entries"] = nullptr;
+    doc["nvs_total_entries"] = nullptr;
+  }
+  // WiFi RSSI if connected
+  if (WiFi.status() == WL_CONNECTED) doc["rssi"] = WiFi.RSSI();
+  else doc["rssi"] = nullptr;
+
+  server.setContentLength(measureJson(doc));
+  server.send(200, "application/json", "");
+  WiFiClient client = server.client();
+  serializeJson(doc, client); // Streams directly to the network buffer
 }
 
 void handleTimeSync() {
@@ -611,6 +1003,8 @@ void handleTimeSync() {
   doc["ok"] = ok;
   if (ok) {
     uint64_t epoch = getCurrentEpochSec();
+    Settings settings{};
+    getSettingsSnapshot(settings);
     doc["epoch"] = epoch;
     doc["tzOffsetMinutes"] = settings.tzOffsetMinutes;
     String out; serializeJson(doc, out);
@@ -623,72 +1017,96 @@ void handleTimeSync() {
 }
 
 void handlePumpToggle() {
+  if (getAutoEnabled()) {
+    server.send(409, "text/plain", "AUTO_MODE");
+    return;
+  }
   pumpOn();
-  // schedule pump off in background task to avoid blocking web server
-  uint32_t *delay_ms = new uint32_t(5000);
-  xTaskCreate(pumpOffTask, "pumpOff", 2048, delay_ms, tskIDLE_PRIORITY+1, NULL);
+  // reset/start one-shot timer to turn pump off after delay
+  if (sPumpOffTimer) {
+    xTimerReset(sPumpOffTimer, 0);
+  } else {
+    // fallback: create and start timer if not yet created
+    sPumpOffTimer = xTimerCreate("pumpOff", pdMS_TO_TICKS(5000), pdFALSE, NULL, pumpOffTimerCallback);
+    if (sPumpOffTimer) xTimerStart(sPumpOffTimer, 0);
+  }
   server.send(200, "text/plain", "OK");
 }
 
 void handleSettings() {
   if (server.method() != HTTP_POST) { server.send(405); return; }
   String body = server.arg("plain");
-  if (body.length()) {
-    JsonDocument doc;
-    auto err = deserializeJson(doc, body);
-    if (err) {
-      server.send(400, "text/plain", "BAD_JSON");
+  if (body.isEmpty()) { server.send(400, "text/plain", "EMPTY"); return; }
+  JsonDocument doc;
+  if (deserializeJson(doc, body)) {
+    server.send(400, "text/plain", "BAD_JSON");
+    return;
+  }
+
+  Settings next{};
+  getSettingsSnapshot(next);
+  bool oldAuto = getAutoEnabled();
+  bool newAuto = oldAuto;
+  bool hasManualTime = false;
+  uint32_t manualTimeSec = 0;
+  if (doc["name"].is<const char*>())
+    copyUtf8Truncated(doc["name"].as<const char*>(), next.name, sizeof(next.name));
+  if (doc["auto"].is<bool>()) newAuto = doc["auto"].as<bool>();
+  if (doc["wint"].is<uint32_t>()) next.waterInterval = doc["wint"].as<uint32_t>();
+  if (doc["dsint"].is<uint32_t>()) next.dataSyncInterval = doc["dsint"].as<uint32_t>();
+  if (doc["activeStart"].is<uint32_t>()) next.activeStart = doc["activeStart"].as<uint32_t>();
+  if (doc["activeEnd"].is<uint32_t>()) next.activeEnd = doc["activeEnd"].as<uint32_t>();
+  if (doc["newTime"].is<const char*>()) {
+    const char* value = doc["newTime"];
+    int hours = 0;
+    int minutes = 0;
+    char trailing = '\0';
+    if (!value || sscanf(value, "%d:%d%c", &hours, &minutes, &trailing) != 2 ||
+        hours < 0 || hours > 23 || minutes < 0 || minutes > 59 ||
+        (getCurrentEpochSec() == 0 && next.savedUtcSec == 0)) {
+      server.send(400, "text/plain", "BAD_TIME");
       return;
     }
-    // capture old tz for epoch adjustment
-    int16_t oldTz = settings.tzOffsetMinutes;
-
-    if (doc["name"].is<const char*>()) settings.name = String((const char*)doc["name"]);
-    if (doc["auto"].is<bool>()) autoEnabled = (bool)doc["auto"];
-    if (doc["wint"].is<uint32_t>()) settings.waterInterval = constrain((uint32_t)doc["wint"], 60, 2419200);
-    // optional time input in "HH:MM" (24h). If provided, update saved time.
-    if (doc["newTime"].is<const char*>()) {
-      const char* tstr = doc["newTime"];
-      int hh=0, mm=0;
-      if (sscanf(tstr, "%d:%d", &hh, &mm) == 2) {
-        if (hh >=0 && hh <24 && mm >=0 && mm <60) {
-          uint32_t sec = (uint32_t)hh*3600u + (uint32_t)mm*60u;
-          setUserTimeOfDaySec(sec);
-        }
-      }
-    }
-    // optional timezone input: accept tzOffsetMinutes or tzOffset string like +01:00
-    if (doc["tzOffsetMinutes"].is<int>()) {
-      int16_t newTz = (int16_t)(int)doc["tzOffsetMinutes"];
-      if (settings.savedEpochSec != 0) {
-        int32_t deltaMin = (int32_t)newTz - (int32_t)oldTz;
-        int64_t newEpoch = (int64_t)settings.savedEpochSec + (int64_t)deltaMin * 60LL;
-        if (newEpoch < 0) newEpoch = 0;
-        settings.savedEpochSec = (uint64_t)newEpoch;
-      }
-      settings.tzOffsetMinutes = newTz;
-    } else if (doc["tzOffset"].is<const char*>()) {
-      const char* tzs = doc["tzOffset"];
-      int hh=0, mm=0;
-      if (sscanf(tzs, "%d:%d", &hh, &mm) == 2) {
-        int sign = 1;
-        if (tzs[0] == '-') sign = -1; else if (tzs[0] == '+') sign = 1;
-        int ah = hh < 0 ? -hh : hh;
-        int16_t newTz = (int16_t)(sign*(ah*60 + mm));
-        if (settings.savedEpochSec != 0) {
-          int32_t deltaMin = (int32_t)newTz - (int32_t)oldTz;
-          int64_t newEpoch = (int64_t)settings.savedEpochSec + (int64_t)deltaMin * 60LL;
-          if (newEpoch < 0) newEpoch = 0;
-          settings.savedEpochSec = (uint64_t)newEpoch;
-        }
-        settings.tzOffsetMinutes = newTz;
-      }
-    }
-      // optional active window (seconds since midnight)
-      if (doc["activeStart"].is<uint32_t>()) settings.activeStart = (uint32_t)doc["activeStart"];
-      if (doc["activeEnd"].is<uint32_t>()) settings.activeEnd = (uint32_t)doc["activeEnd"];
+    hasManualTime = true;
+    manualTimeSec = hours * 3600u + minutes * 60u;
   }
-  markSettingsDirty();
+
+  if (doc["tzOffsetMinutes"].is<int>()) {
+    int value = doc["tzOffsetMinutes"].as<int>();
+    if (value < -840 || value > 840) {
+      server.send(400, "text/plain", "BAD_TIMEZONE");
+      return;
+    }
+    next.tzOffsetMinutes = value;
+  } else if (doc["tzOffset"].is<const char*>()) {
+    const char* value = doc["tzOffset"];
+    int hours = 0;
+    int minutes = 0;
+    char trailing = '\0';
+    if (!value || (value[0] != '+' && value[0] != '-') ||
+        sscanf(value + 1, "%d:%d%c", &hours, &minutes, &trailing) != 2 ||
+        hours > 14 || minutes > 59 || (hours == 14 && minutes != 0)) {
+      server.send(400, "text/plain", "BAD_TIMEZONE");
+      return;
+    }
+    int sign = value[0] == '-' ? -1 : 1;
+    next.tzOffsetMinutes = sign * (hours * 60 + minutes);
+  }
+
+  if (!applySettingsSnapshot(next)) {
+    server.send(400, "text/plain", "BAD_SETTINGS");
+    return;
+  }
+  setAutoEnabled(newAuto);
+  if (newAuto && !oldAuto) {
+    if (sPumpOffTimer) xTimerStop(sPumpOffTimer, 0);
+    pumpOff();
+  }
+
+  if (hasManualTime && !setUserTimeOfDaySec(manualTimeSec)) {
+      server.send(400, "text/plain", "BAD_TIME");
+      return;
+  }
   server.send(200, "text/plain", "OK");
 }
 
@@ -705,78 +1123,94 @@ void handleClearAllSettings() {
 }
 
 void handleNodes() {
-  // Return configured workers list with latest discovered readings when available
+  // Return configured worker devices with latest discovered readings when available
   JsonDocument doc;
   JsonArray arr = doc.to<JsonArray>();
-  uint64_t nowEpoch = getCurrentEpochSec();
-  unsigned long curBootSec = millis() / 1000;
-  for (int i=0;i<workerListCount;i++) {
-    const WorkerConfig &wc = workerList[i];
+  int64_t nowUs = esp_timer_get_time();
+  int workerCount = getWorkerConfigCount();
+  for (int i = 0; i < workerCount; ++i) {
+    WorkerConfig wc{};
+    if (!getWorkerConfigAt(i, wc)) continue;
     char macs[32];
     sprintf(macs, "%02X%02X%02X%02X%02X%02X", wc.mac[0],wc.mac[1],wc.mac[2],wc.mac[3],wc.mac[4],wc.mac[5]);
     JsonObject o = arr.add<JsonObject>();
-    o["mac"] = String(macs);
-    o["potIndex"] = (int)wc.potIndex;
-    o["name"] = String(wc.name);
-    o["threshold"] = wc.threshold;
-    o["duration"] = wc.duration;
-    const WorkerNode* n = btMainFindNodeByMac(wc.mac);
-    if (n) {
-      if (wc.potIndex < n->potCount) o["soil"] = (int)n->soils[wc.potIndex]; else o["soil"] = nullptr;
-      o["battery"] = n->battery;
-      // convert node's boot-relative lastSync to epoch if available
-      if (n->lastSync != 0 && nowEpoch != 0) o["lastSync"] = (uint64_t)(nowEpoch - (uint64_t)(curBootSec - n->lastSync)); else o["lastSync"] = nullptr;
-      // prefer per-pot lastWater if set, otherwise compute a node-level fallback
-      unsigned long perPot = 0;
-      if (wc.potIndex < MAX_POTS_PER_DEVICE) perPot = n->lastWater[wc.potIndex];
-      if (perPot != 0 && nowEpoch != 0) {
-        o["lastWater"] = (uint64_t)(nowEpoch - (uint64_t)(curBootSec - perPot));
+    o["mac"] = macs;
+    o["workerName"] = wc.workerName;
+    o["potCount"] = wc.potCount;
+    JsonArray pots = o["pots"].to<JsonArray>();
+    WorkerNode node{};
+    bool hasNode = btMainGetNodeByMac(wc.mac, node);
+    if (hasNode) {
+      o["battery"] = calculateBatteryPercent(node.batteryMv);
+      o["batteryMv"] = node.batteryMv;
+      if (node.lastRssi != 0x7FFF) o["rssi"] = (int)node.lastRssi;
+      else o["rssi"] = nullptr;
+      if (node.lastSyncUs != 0 && nowUs >= node.lastSyncUs) {
+        o["lastSyncAgo"] =
+            static_cast<uint64_t>((nowUs - node.lastSyncUs) / 1000000LL);
       } else {
-        // find the most recent per-pot lastWater for this node
-        unsigned long nodeLast = 0;
-        int maxP = (n->potCount > 0) ? n->potCount : MAX_POTS_PER_DEVICE;
-        if (maxP > MAX_POTS_PER_DEVICE) maxP = MAX_POTS_PER_DEVICE;
-        for (int p = 0; p < maxP; ++p) {
-          if (n->lastWater[p] > nodeLast) nodeLast = n->lastWater[p];
-        }
-        if (nodeLast != 0) {
-          if (nodeLast >= 1600000000UL) o["lastWater"] = (uint64_t)nodeLast;
-          else if (nowEpoch != 0) o["lastWater"] = (uint64_t)(nowEpoch - (uint64_t)(curBootSec - nodeLast));
-          else o["lastWater"] = nullptr;
-        } else {
-          o["lastWater"] = nullptr;
-        }
+        o["lastSyncAgo"] = nullptr;
       }
-      o["nodePotCount"] = n->potCount;
+      o["nodePotCount"] = node.potCount;
     } else {
-      o["soil"] = nullptr;
       o["battery"] = nullptr;
-      o["lastSync"] = nullptr;
-      o["lastWater"] = nullptr;
+      o["batteryMv"] = nullptr;
+      o["rssi"] = nullptr;
+      o["lastSyncAgo"] = nullptr;
       o["nodePotCount"] = nullptr;
     }
+    int potCount = wc.potCount;
+    if (potCount > MAX_POTS_PER_DEVICE) potCount = MAX_POTS_PER_DEVICE;
+    for (int p = 0; p < potCount; ++p) {
+      JsonObject po = pots.add<JsonObject>();
+      po["index"] = p;
+      po["name"] = wc.potName[p];
+      po["threshold"] = wc.thresholds[p];
+      po["duration"] = wc.durations[p];
+      if (hasNode && p < node.potCount) {
+        po["soil"] =
+            (int)getCorrectedSoilMoisture(node.batteryMv, node.soils[p]);
+        po["soilRaw"] = (int)node.soils[p];
+      } else {
+        po["soil"] = nullptr;
+        po["soilRaw"] = nullptr;
+      }
+      int64_t lastWaterUs = hasNode ? node.lastWaterUs[p] : 0;
+      if (lastWaterUs != 0 && nowUs >= lastWaterUs) {
+        po["lastWaterAgo"] =
+            static_cast<uint64_t>((nowUs - lastWaterUs) / 1000000LL);
+      } else {
+        po["lastWaterAgo"] = nullptr;
+      }
+    }
   }
-  String out;
-  serializeJson(arr, out);
-  server.send(200, "application/json", out);
+  server.setContentLength(measureJson(doc));
+  server.send(200, "application/json", "");
+  WiFiClient client = server.client();
+  serializeJson(doc, client); // Streams directly to the network buffer
 }
 
 void handleWorkerAdd() {
   if (server.method() != HTTP_POST) { server.send(405); return; }
   String body = server.arg("plain");
-  // expect JSON: {"mac":"AABBCCDDEEFF","threshold":2000,"duration":5,"name":"plant name"}
   String mac=""; uint16_t th=2000; uint16_t dur=5; String name="";
-  if (body.length()) {
-    JsonDocument doc;
-    auto err = deserializeJson(doc, body);
-    if (!err) {
-      mac = String((const char*)(doc["mac"] | ""));
-      th = (uint16_t)constrain((uint32_t)(doc["threshold"] | 2000), 0, 4095);
-      dur = (uint16_t)constrain((uint32_t)(doc["duration"] | 5), 1, 60);
-      if (doc["name"].is<const char*>()) name = String((const char*)doc["name"]);
-    }
+  JsonDocument doc;
+  if (body.isEmpty() || deserializeJson(doc, body)) {
+    server.send(400, "text/plain", "BAD_JSON");
+    return;
   }
-  bool ok = addWorkerByHex(mac, th, dur, name);
+  mac = String((const char*)(doc["mac"] | ""));
+  uint32_t thresholdValue = doc["threshold"] | 2000;
+  uint32_t durationValue = doc["duration"] | 5;
+  if (thresholdValue > 4095 || durationValue == 0 || durationValue > 60) {
+    server.send(400, "text/plain", "BAD_VALUES");
+    return;
+  }
+  th = thresholdValue;
+  dur = durationValue;
+  if (doc["workerName"].is<const char*>()) name = String((const char*)doc["workerName"]);
+  else if (doc["name"].is<const char*>()) name = String((const char*)doc["name"]);
+  bool ok = addWorkerByHex(mac.c_str(), th, dur, name.length()?name.c_str():nullptr);
   server.send(ok?200:400, "text/plain", ok?"OK":"ERR");
 }
 
@@ -789,7 +1223,7 @@ void handleWorkerRemove() {
     auto err = deserializeJson(doc, body);
     if (!err) mac = String((const char*)(doc["mac"] | ""));
   }
-  bool ok = removeWorkerByHex(mac);
+  bool ok = removeWorkerByHex(mac.c_str());
   server.send(ok?200:400, "text/plain", ok?"OK":"ERR");
 }
 
@@ -798,6 +1232,7 @@ void handleWorkerUpdate() {
   String body = server.arg("plain");
   String mac=""; uint16_t th=2000; uint16_t dur=5; String name="";
   int potIndex = -1;
+  bool hasNameField = false;
   if (body.length()) {
     JsonDocument doc;
     auto err = deserializeJson(doc, body);
@@ -806,17 +1241,25 @@ void handleWorkerUpdate() {
       return;
     }
     mac = String((const char*)(doc["mac"] | ""));
-    th = (uint16_t)constrain((uint32_t)(doc["threshold"] | 2000), 0, 4095);
-    dur = (uint16_t)constrain((uint32_t)(doc["duration"] | 5), 1, 60);
-    if (doc["name"].is<const char*>()) name = String((const char*)doc["name"]);
+    uint32_t thresholdValue = doc["threshold"] | 2000;
+    uint32_t durationValue = doc["duration"] | 5;
+    if (thresholdValue > 4095 || durationValue == 0 || durationValue > 60) {
+      server.send(400, "text/plain", "BAD_VALUES");
+      return;
+    }
+    th = thresholdValue;
+    dur = durationValue;
+    if (doc["name"].is<const char*>()) { name = String((const char*)doc["name"]); hasNameField = true; }
+    if (doc["workerName"].is<const char*>()) { name = String((const char*)doc["workerName"]); hasNameField = true; }
     if (doc["potIndex"].is<int>()) potIndex = (int)doc["potIndex"];
   }
-  bool ok = updateWorkerByHex(mac, th, dur, name, potIndex);
+  bool ok = updateWorkerByHex(mac.c_str(), th, dur, hasNameField ? name.c_str() : nullptr, potIndex);
   server.send(ok?200:400, "text/plain", ok?"OK":"ERR");
 }
 
 void handleWorkerWater() {
   if (server.method() != HTTP_POST) { server.send(405); return; }
+  if (getAutoEnabled()) { server.send(409, "text/plain", "AUTO_MODE"); return; }
   String body = server.arg("plain");
   String mac=""; int dur = -1;
   int potIndex = -1;
@@ -830,46 +1273,42 @@ void handleWorkerWater() {
     }
   }
   uint8_t macb[6];
-  if (!macFromHexString(mac, macb)) { server.send(400, "text/plain", "BAD_MAC"); return; }
-  // find configured duration if not provided
-  if (dur <= 0) {
-    bool found = false;
-    for (int i=0;i<workerListCount;i++) {
-      bool same = true; for (int k=0;k<6;k++) if (workerList[i].mac[k]!=macb[k]) { same=false; break; }
-      if (same) { dur = workerList[i].duration; found = true; break; }
-    }
-    if (!found) { server.send(400, "text/plain", "NO_DURATION"); return; }
+  if (!macFromHexString(mac.c_str(), macb)) { server.send(400, "text/plain", "BAD_MAC"); return; }
+  WorkerConfig worker{};
+  if (!findWorkerConfigByMac(macb, worker)) {
+    server.send(400, "text/plain", "NO_WORKER");
+    return;
   }
-  // Build compact CMD_WATER payload: [TYPE_CMD_WATER][potMask(2)][duration(2)]
+  if (dur > 60) { server.send(400, "text/plain", "BAD_DURATION"); return; }
+
   uint16_t potMask = 0;
+  uint16_t durations[MAX_POTS_PER_DEVICE] = {};
+  int durCount = 0;
   if (potIndex >= 0) {
-    if (potIndex >= MAX_POTS_PER_DEVICE) { server.send(400, "text/plain", "BAD_POT_INDEX"); return; }
-    potMask = (uint16_t)(1u << potIndex);
-  } else {
-    // if no potIndex specified, pick first matching configured pot for this MAC
-    for (int i=0;i<workerListCount;i++) {
-      bool same = true; for (int k=0;k<6;k++) if (workerList[i].mac[k]!=macb[k]) { same=false; break; }
-      if (same) { potMask |= (uint16_t)(1u << workerList[i].potIndex); }
+    if (potIndex >= worker.potCount) {
+      server.send(400, "text/plain", "BAD_POT_INDEX");
+      return;
     }
-    if (potMask == 0) potMask = 1; // default to pot 0
+    if (dur <= 0) dur = worker.durations[potIndex];
+    potMask = (uint16_t)(1u << potIndex);
+    durations[durCount++] = (uint16_t)dur;
+  } else {
+    int potCount = min(static_cast<int>(worker.potCount), MAX_POTS_PER_DEVICE);
+    for (int p = 0; p < potCount; ++p) {
+      potMask |= (uint16_t)(1u << p);
+      durations[durCount++] =
+          dur > 0 ? static_cast<uint16_t>(dur) : worker.durations[p];
+    }
   }
-  uint8_t payload[5];
-  payload[0] = BT_TLV::TYPE_CMD_WATER;
-  payload[1] = (uint8_t)((potMask >> 8) & 0xFF);
-  payload[2] = (uint8_t)(potMask & 0xFF);
-  payload[3] = (uint8_t)((dur >> 8) & 0xFF);
-  payload[4] = (uint8_t)(dur & 0xFF);
-  bool queued = btMainQueueCommand(macb, payload, sizeof(payload), 2, 700);
-  if (queued) {
-    // record per-pot last water (boot seconds); UI will convert to epoch for display
-    btMainSetNodeLastWater(macb, potMask, millis() / 1000);
-    server.send(202, "text/plain", "QUEUED");
-  } else server.send(500, "text/plain", "ERR");
+  bool queued = wateringQueueManual(macb, potMask, durations, durCount);
+  server.send(queued ? 202 : 503, "text/plain",
+              queued ? "QUEUED" : "BUSY");
 }
 
 void webBegin() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
+  server.on("/diagnostics", HTTP_GET, handleDiagnostics);
   server.on("/pump/toggle", HTTP_POST, handlePumpToggle);
   server.on("/settings", HTTP_ANY, handleSettings);
   server.on("/time/sync", HTTP_POST, handleTimeSync);
@@ -881,6 +1320,8 @@ void webBegin() {
   server.on("/wifi/clear", HTTP_POST, handleClearWifiCred);
   server.on("/settings/clear_all", HTTP_POST, handleClearAllSettings);
   server.begin();
+  // create one-shot pump-off timer (no heap allocation per request)
+  if (!sPumpOffTimer) sPumpOffTimer = xTimerCreate("pumpOff", pdMS_TO_TICKS(5000), pdFALSE, NULL, pumpOffTimerCallback);
   // OTA handled via ArduinoOTA in main setup
 }
 

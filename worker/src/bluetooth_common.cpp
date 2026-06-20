@@ -1,316 +1,636 @@
 #include "BluetoothCommon.h"
+#include "BluetoothCrypto.h"
 #include "Utility.h"
+
 #include <cstring>
-#include <NimBLEDevice.h>
 #include <NimBLEExtAdvertising.h>
-#include <NimBLEAdvertising.h>
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "BluetoothCrypto.h"
-#include "HardwareConfig.h"
 
-#if defined(WORKER_POT_COUNT)
-#if WORKER_POT_COUNT > 4 && !USE_EXT_ADV
-#error "WORKER_POT_COUNT > 4 requires USE_EXT_ADV=1 in build flags to avoid legacy advert truncation"
-#endif
+#if !defined(CONFIG_BT_NIMBLE_EXT_ADV) || !CONFIG_BT_NIMBLE_EXT_ADV
+#error "Bluetooth TLV protocol requires CONFIG_BT_NIMBLE_EXT_ADV=1"
 #endif
 
-using namespace BT_TLV;
+const uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-/*
-  Bluetooth packet formats and crypto (shared common helpers)
-
-  Overview
-  - BLE Manufacturer Specific Data (AD type 0xFF) is used. The AD payload begins
-    with a 2-byte Company Identifier (little-endian). Use 0xFFFF for local/test.
-
-  Supported payload encodings
-  1) Compact packet (preferred)
-     CompanyID (2) + TargetMAC (6) + Nonce (2, big-endian) + MsgPayload...
-     - MsgPayload starts with a single MsgType byte (reuse TYPE_CMD_* /TYPE_STATUS values).
-     - Examples:
-       - TYPE_STATUS (0x40): [TYPE_STATUS][Battery(1)][PotCount(1)][Soil1(2), ...]
-       - TYPE_CMD_WATER (0x32): compact form: [TYPE_CMD_WATER][PotMask(2)][Duration(2)]
-       - TYPE_ACK (0x20): payload may be empty or include additional fields as needed.
-
-  2) Legacy TLV (backwards compatibility)
-     CompanyID (2) + sequence of TLV fields: [Type(1), Length(1), Value(Length)]
-     - The code continues to provide TLV helpers (tlv_*). Sender code will convert
-       queued TLV payloads to compact packets when appropriate (see below).
-
-  Encryption (AEAD)
-  - When `USE_BT_CRYPTO` is enabled, MsgPayload (the bytes after TargetMAC+Nonce) is
-    encrypted with AES-GCM and the 16-byte authentication tag is appended to the
-    ciphertext.
-  - IV derivation: IV = first 12 bytes of HMAC-SHA256(network_key, target_mac || nonce || "btiv").
-    This provides a deterministic per-packet IV derived from the 2-byte nonce and target MAC.
-  - Implementations: `btEncryptPayload` / `btDecryptPayload` in `bluetooth_crypto.cpp` use
-    mbedTLS GCM APIs. The network key is currently a placeholder and must be provisioned
-    securely in production (NVS / provisioning flow).
-  - On decryption failure, `parse_compact_packet_header()` currently falls back to returning
-    the raw, unencrypted payload so the system can interoperate with unencrypted workers.
-    A small compatibility fallback attempts decryption with a reversed-MAC byte order when
-    IV derivation ordering mismatches occur.
-
-  Extended Advertising
-  - If `USE_EXT_ADV` is enabled and the build/stack supports extended adverts, the code
-    will attempt to publish using `NimBLEExtAdvertising` to allow payloads larger than
-    the legacy 31-byte limit. The implementation falls back to `NimBLEAdvertising` when
-    extended advertising is unavailable.
-
-  Parsing and compatibility notes
-  - The common scan callback strips the CompanyID and hands the remainder to the
-    registered advert handler. `parse_compact_packet_header()` expects data starting at
-    TargetMAC (i.e., the first 6 bytes are the target MAC) and returns a pointer/len
-    to the payload (decrypted if AEAD is enabled).
-  - For queued send payloads, the sender performs a TLV->compact conversion only when
-    the queued buffer appears to be a TLV payload robustly: the length byte must
-    exactly equal the remaining bytes (payload[1] == len - 2). This avoids
-    mis-detecting compact messages whose second byte (e.g. battery) looks like a TLV length.
-
-  Security note
-  - Do not hardcode network keys in production. Ensure keys are provisioned and rotated
-    securely. Consider ChaCha20-Poly1305 as an alternative AEAD on platforms lacking AES
-    hardware acceleration.
-*/
-
-// Legacy TLV parsing removed as repository uses compact packet format.
-// _parse_tlv_once and per-field TLV extractors were intentionally removed.
-
-// --- Command queue / sender shared implementation ---
 namespace {
-  struct PendingCmd { uint16_t nonce; bool inUse; volatile bool acked; };
-  static const int MAX_PENDING = 8;
-  static PendingCmd pending[MAX_PENDING];
-  static uint16_t next_nonce = 1;
-  static uint16_t allocNonce() { uint16_t n = next_nonce++; if (next_nonce==0) next_nonce=1; return n; }
+constexpr size_t PACKET_HEADER_SIZE = 18;
+constexpr size_t GCM_TAG_SIZE = 16;
+constexpr size_t MAX_PACKET_SIZE = 2 + PACKET_HEADER_SIZE + BT_TLV::MAX_BODY_SIZE + GCM_TAG_SIZE;
+constexpr UBaseType_t TX_QUEUE_LEN = 6;
+constexpr uint32_t ADV_DURATION_MS = 500;
+constexpr uint16_t ADV_INTERVAL_MIN_UNITS = 48;  // 30 ms at 0.625 ms/unit
+constexpr uint16_t ADV_INTERVAL_MAX_UNITS = 80;  // 50 ms at 0.625 ms/unit
 
-  static const int CMD_QUEUE_LEN = 8;
-  static const size_t MAX_CMD_PAYLOAD = 64; // allow STATUS payloads for multi-pot workers
-  struct CmdItem { uint8_t mac[6]; uint8_t payload[MAX_CMD_PAYLOAD]; size_t len; int retries; unsigned timeoutMs; };
-  static QueueHandle_t cmdQueue = nullptr;
-  
-  static const int ACK_QUEUE_LEN = 4;
-  struct AckItem { uint8_t mac[6]; uint16_t nonce; };
-  static QueueHandle_t ackQueue = nullptr;
+enum class TxKind : uint8_t { COMMAND, ACK };
 
-  static SemaphoreHandle_t sBroadcastMutex = nullptr;
-  static OnCommandSentCb gOnSent = nullptr;
+struct TxJob {
+  TxKind kind;
+  uint8_t mac[6];
+  BtMessageId messageId;
+  uint8_t payload[BT_TLV::MAX_BODY_SIZE];
+  uint8_t payloadLen;
+  uint8_t retries;
+  uint32_t ackTimeoutMs;
+  BtBeforeTransmitCb beforeTransmit;
+  void* context;
+  TaskHandle_t waiter;
+  BtSendResult* result;
+};
+
+struct PendingAck {
+  bool active;
+  bool acked;
+  uint8_t targetMac[6];
+  BtMessageId messageId;
+  uint8_t ackMac[6];
+};
+
+QueueHandle_t gTxQueue = nullptr;
+TaskHandle_t gSenderTask = nullptr;
+BT_TLV::AdvertHandler gAdvertHandler = nullptr;
+uint64_t gSessionId = 0;
+uint32_t gNextSequence = 1;
+portMUX_TYPE gIdMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE gPendingMux = portMUX_INITIALIZER_UNLOCKED;
+PendingAck gPending = {};
+
+const char* btTypeName(uint8_t type) {
+  switch (type) {
+    case BT_TLV::TYPE_ACK: return "ACK";
+    case BT_TLV::TYPE_CMD_PROBE: return "CMD_PROBE";
+    case BT_TLV::TYPE_CMD_SLEEP: return "CMD_SLEEP";
+    case BT_TLV::TYPE_CMD_WATER: return "CMD_WATER";
+    case BT_TLV::TYPE_STATUS: return "STATUS";
+    case BT_TLV::TYPE_CONFIG: return "CONFIG";
+    case BT_TLV::TYPE_EVENT_WATER_DONE: return "EVENT_WATER_DONE";
+    default: return "UNKNOWN";
+  }
 }
 
-namespace BT_TLV {
-  void btCommonRegisterOnCommandSent(OnCommandSentCb cb) { gOnSent = cb; }
-
-  void btCommonMarkAck(uint16_t nonce) {
-    for (int i=0;i<MAX_PENDING;i++) if (pending[i].inUse && pending[i].nonce==nonce) pending[i].acked = true;
+const char* btSendStatusName(BtSendStatus status) {
+  switch (status) {
+    case BtSendStatus::INVALID: return "INVALID";
+    case BtSendStatus::QUEUE_FULL: return "QUEUE_FULL";
+    case BtSendStatus::TRANSMIT_FAILED: return "TRANSMIT_FAILED";
+    case BtSendStatus::SENT: return "SENT";
+    case BtSendStatus::ACKED: return "ACKED";
+    default: return "UNKNOWN";
   }
+}
 
-  static void btCommonSenderTask(void* pv) {
-    (void)pv;
-    CmdItem cmdItem;
-    for (;;) {
-      if (xQueueReceive(cmdQueue, &cmdItem, portMAX_DELAY) == pdTRUE) {
-        int slot=-1; for (int i=0;i<MAX_PENDING;i++) if (!pending[i].inUse) { slot=i; break; }
-        if (slot<0) continue; // drop if no pending slot
-        uint8_t cmdData[256];
-        uint16_t nonce = allocNonce();
-        // Queued payloads are compact: [msgType][...]
-        size_t compactLen = cmdItem.len;
-        const uint8_t* compactPayload = cmdItem.payload;
-        size_t cmdLen = make_compact_packet(cmdItem.mac, nonce, compactPayload, compactLen, cmdData, USE_BT_CRYPTO);
-        pending[slot].inUse = true; pending[slot].acked = false; pending[slot].nonce = nonce;
-        // Notify on-sent for water commands (compact payload starts with msgType)
-        if (cmdItem.len >= 1 && cmdItem.payload[0] == TYPE_CMD_WATER) {
-          if (gOnSent) gOnSent(cmdItem.mac, nonce);
-        }
-        LOG("[->] [%d] Send to: %02X:%02X:%02X:%02X:%02X:%02X", nonce, cmdItem.mac[0], cmdItem.mac[1], cmdItem.mac[2], cmdItem.mac[3], cmdItem.mac[4], cmdItem.mac[5]);
-        LOG("[->] [%d] Payload type: %02X", nonce, cmdItem.payload[0]);
-        for (int attempt=0; attempt<=cmdItem.retries; ++attempt) {
-          LOG("[->] [%d] Attempt %d/%d", nonce, attempt, cmdItem.retries);
-          BT_TLV::btCommonBroadcast(cmdData, cmdLen, 300);
-          unsigned long start = millis();
-          while (millis()-start < cmdItem.timeoutMs) {
-            if (pending[slot].acked) break;
-            vTaskDelay(pdMS_TO_TICKS(20));
-          }
-          if (pending[slot].acked) break;
-        }
-        pending[slot].inUse = false;
-      }
-    }
+bool sameMessageId(const BtMessageId& a, const BtMessageId& b) {
+  return a.sessionId == b.sessionId && a.sequence == b.sequence;
+}
+
+bool isBroadcast(const uint8_t mac[6]) {
+  return memcmp(mac, BROADCAST_MAC, 6) == 0;
+}
+
+BtMessageId allocateMessageId() {
+  portENTER_CRITICAL(&gIdMux);
+  BtMessageId id{gSessionId, gNextSequence++};
+  if (gNextSequence == 0) {
+    ++gSessionId;
+    if (gSessionId == 0) gSessionId = 1;
+    gNextSequence = 1;
   }
+  portEXIT_CRITICAL(&gIdMux);
+  return id;
+}
 
-  static void btAckSenderTask(void* pv) {
-    (void)pv;
-    AckItem ackItem;
-    for (;;) {
-      if (xQueueReceive(ackQueue, &ackItem, portMAX_DELAY) == pdTRUE) {
-        uint8_t ackData[64];
-        uint8_t ackPayload[1]; ackPayload[0] = TYPE_ACK; // MsgType==ACK
-        size_t ackLen = make_compact_packet(ackItem.mac, ackItem.nonce, ackPayload, sizeof(ackPayload), ackData, USE_BT_CRYPTO);
-        btCommonBroadcast(ackData, ackLen, 300);
-      }
-    }
+void completeJob(const TxJob& job, const BtSendResult& result) {
+  if (!job.waiter || !job.result) return;
+  *job.result = result;
+  xTaskNotifyGive(job.waiter);
+}
+
+bool broadcastPacket(const uint8_t* packet, size_t len, uint32_t durationMs,
+                     BtBeforeTransmitCb beforeTransmit, void* context,
+                     int64_t& startedUs) {
+  NimBLEExtAdvertising* advertising = NimBLEDevice::getAdvertising();
+  advertising->stop(0);
+  advertising->removeInstance(0);
+
+  NimBLEExtAdvertisement advert;
+  advert.setLegacyAdvertising(false);
+  advert.setConnectable(false);
+  advert.setScannable(false);
+  advert.setMinInterval(ADV_INTERVAL_MIN_UNITS);
+  advert.setMaxInterval(ADV_INTERVAL_MAX_UNITS);
+  advert.setManufacturerData(packet, len);
+
+  bool configured = false;
+  for (int attempt = 0; attempt < 3 && !configured; ++attempt) {
+    configured = advertising->setInstanceData(0, advert);
+    if (!configured) vTaskDelay(pdMS_TO_TICKS(10));
   }
-
-  bool btCommonInitSender() {
-    sBroadcastMutex = xSemaphoreCreateMutex();
-    if (!cmdQueue) cmdQueue = xQueueCreate(CMD_QUEUE_LEN, sizeof(CmdItem));
-    if (!ackQueue) ackQueue = xQueueCreate(ACK_QUEUE_LEN, sizeof(AckItem));
-    if (cmdQueue && ackQueue) {
-      static bool started = false;
-      if (!started) {
-        xTaskCreate(btCommonSenderTask, "btCommonSender", 3072, NULL, 3, NULL);
-        xTaskCreate(btAckSenderTask, "btAckSender", 3072, NULL, 2, NULL);
-        started = true;
-      }
-      return true;
-    }
+  if (!configured || !advertising->start(0, durationMs)) {
+    advertising->stop(0);
+    advertising->removeInstance(0);
     return false;
   }
 
-  bool btCommonQueueCommand(const uint8_t target_mac[6], const uint8_t* payload, size_t len, int retries, unsigned timeoutMs) {
-    if (!cmdQueue) return false;
-    if (len > MAX_CMD_PAYLOAD) return false;
-    CmdItem it;
-    memcpy(it.mac, target_mac, 6);
-    memset(it.payload, 0, MAX_CMD_PAYLOAD);
-    memcpy(it.payload, payload, len);
-    it.len = len; it.retries = retries; it.timeoutMs = timeoutMs;
-    return xQueueSend(cmdQueue, &it, 0) == pdTRUE;
+  startedUs = esp_timer_get_time();
+  if (beforeTransmit) beforeTransmit(context);
+
+  const int64_t deadlineUs = startedUs + (static_cast<int64_t>(durationMs) + 500) * 1000;
+  while (advertising->isActive(0) && esp_timer_get_time() < deadlineUs) {
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
-
-  bool btCommonQueueAck(const uint8_t target_mac[6], uint16_t nonce) {
-    if (!ackQueue) return false;
-    AckItem it;
-    memcpy(it.mac, target_mac, 6);
-    it.nonce = nonce;
-    return xQueueSend(ackQueue, &it, 0) == pdTRUE;
-  }
-
-}
-
-void extract_src_mac(const NimBLEAdvertisedDevice* adv, uint8_t src_mac[6]) {
-  // read advertiser address (sender) from the advertisement metadata
-  NimBLEAddress advAddr = adv->getAddress();
-  advAddr.reverseByteOrder();
-  for (int i = 0; i < 6; i++) src_mac[i] = advAddr.getVal()[i];
-}
-// Legacy TLV helpers removed — repository uses compact packet format only.
-
-// New compact packet builder: CompanyID(2) + TargetMAC(6) + Nonce(2 BE) + payload (msgType + ...)
-size_t make_compact_packet(const uint8_t target_mac[6], uint16_t nonce, const uint8_t* payload, size_t payload_len, uint8_t* out, bool encrypt) {
-  size_t pos = 0;
-  out[pos++] = 0xFF; out[pos++] = 0xFF; // CompanyID
-  memcpy(&out[pos], target_mac, 6); pos += 6;
-  out[pos++] = (uint8_t)(nonce >> 8);
-  out[pos++] = (uint8_t)(nonce & 0xFF);
-  if (payload_len > 0) {
-    if (encrypt) {
-      size_t out_len = payload_len + 16; // AES-GCM tag 16 bytes
-      if (!btEncryptPayload(payload, payload_len, target_mac, nonce, &out[pos], out_len)) {
-        // encryption failed — fall back to plaintext
-        memcpy(&out[pos], payload, payload_len); pos += payload_len;
-      } else {
-        pos += out_len;
-      }
-    } else {
-      memcpy(&out[pos], payload, payload_len); pos += payload_len;
-    }
-  }
-  return pos;
-}
-
-// Parse a compact packet header (data starts AFTER CompanyID). On success
-// returns true and fills `out_target_mac`, `nonce` and returns pointer/len
-// to payload (payload begins with msgType byte). If crypto is enabled this
-// will attempt to decrypt the payload into an internal buffer and return
-// a pointer to the decrypted bytes.
-bool parse_compact_packet_header(const uint8_t* data, size_t len, uint8_t out_target_mac[6], uint16_t &nonce, const uint8_t*& payload_ptr, size_t &payload_len) {
-  if (!data) return false;
-  // Need at least TargetMAC(6) + Nonce(2)
-  if (len < 8) return false;
-  memcpy(out_target_mac, data, 6);
-  nonce = (uint16_t(data[6]) << 8) | uint16_t(data[7]);
-  const uint8_t* raw_payload = data + 8;
-  size_t raw_len = len - 8;
-#if USE_BT_CRYPTO
-  static uint8_t s_decrypt_buf[256];
-  size_t dec_len = 0;
-  // Try to decrypt; if decryption fails we'll fall back to raw payload
-  if (raw_len > 0 && btDecryptPayload(raw_payload, raw_len, out_target_mac, nonce, s_decrypt_buf, dec_len)) {
-    payload_ptr = s_decrypt_buf;
-    payload_len = dec_len;
-  } else {
-    payload_ptr = raw_payload;
-    payload_len = raw_len;
-  }
-#else
-  payload_ptr = raw_payload;
-  payload_len = raw_len;
-#endif
+  advertising->stop(0);
+  advertising->removeInstance(0);
   return true;
 }
 
-// Crypto and extended advertising helpers are now in BluetoothCrypto.h
-// Shared scan callback implementation and wiring
+BtSendResult emptyResult(BtSendStatus status) {
+  BtSendResult result{};
+  result.status = status;
+  return result;
+}
+
+void processAckJob(const TxJob& job) {
+  BtSendResult result = emptyResult(BtSendStatus::TRANSMIT_FAILED);
+  result.messageId = job.messageId;
+  char target[13];
+  macToHexLower(job.mac, target);
+  LOG("BT TX ack start target=%s id=%08lx%08lx:%lu",
+      target, static_cast<unsigned long>(job.messageId.sessionId >> 32),
+      static_cast<unsigned long>(job.messageId.sessionId & 0xFFFFFFFFULL),
+      static_cast<unsigned long>(job.messageId.sequence));
+
+  uint8_t body[1] = {BT_TLV::TYPE_ACK};
+  uint8_t packet[MAX_PACKET_SIZE];
+  size_t packetLen = make_bt_packet(job.mac, job.messageId, body, sizeof(body), packet);
+  if (packetLen != 0) {
+    int64_t startedUs = 0;
+    if (broadcastPacket(packet, packetLen, ADV_DURATION_MS, nullptr, nullptr, startedUs)) {
+      result.status = BtSendStatus::SENT;
+      result.transmissionStarted = true;
+      result.startedUs = startedUs;
+    }
+  }
+  LOG("BT TX ack result target=%s id=%08lx%08lx:%lu status=%s started=%u",
+      target, static_cast<unsigned long>(job.messageId.sessionId >> 32),
+      static_cast<unsigned long>(job.messageId.sessionId & 0xFFFFFFFFULL),
+      static_cast<unsigned long>(job.messageId.sequence),
+      btSendStatusName(result.status), result.transmissionStarted ? 1u : 0u);
+  completeJob(job, result);
+}
+
+void processUrgentAcks() {
+  TxJob queued{};
+  while (xQueuePeek(gTxQueue, &queued, 0) == pdTRUE && queued.kind == TxKind::ACK) {
+    if (xQueueReceive(gTxQueue, &queued, 0) == pdTRUE) processAckJob(queued);
+  }
+}
+
+void processCommandJob(const TxJob& job) {
+  BtSendResult result = emptyResult(BtSendStatus::TRANSMIT_FAILED);
+  result.messageId = job.messageId;
+  char target[13];
+  macToHexLower(job.mac, target);
+  const uint8_t type = job.payloadLen > 0 ? job.payload[0] : 0;
+
+  uint8_t packet[MAX_PACKET_SIZE];
+  size_t packetLen =
+      make_bt_packet(job.mac, job.messageId, job.payload, job.payloadLen, packet);
+  if (packetLen == 0) {
+    LOG("BT TX encode failed target=%s type=%s(0x%02x) id=%08lx%08lx:%lu",
+        target, btTypeName(type), type,
+        static_cast<unsigned long>(job.messageId.sessionId >> 32),
+        static_cast<unsigned long>(job.messageId.sessionId & 0xFFFFFFFFULL),
+        static_cast<unsigned long>(job.messageId.sequence));
+    completeJob(job, result);
+    return;
+  }
+
+  portENTER_CRITICAL(&gPendingMux);
+  gPending.active = true;
+  gPending.acked = false;
+  memcpy(gPending.targetMac, job.mac, 6);
+  gPending.messageId = job.messageId;
+  memset(gPending.ackMac, 0, sizeof(gPending.ackMac));
+  portEXIT_CRITICAL(&gPendingMux);
+
+  bool callbackUsed = false;
+  for (int attempt = 0; attempt <= job.retries; ++attempt) {
+    int64_t startedUs = 0;
+    BtBeforeTransmitCb callback = callbackUsed ? nullptr : job.beforeTransmit;
+    LOG("BT TX command attempt=%d/%u target=%s type=%s(0x%02x) id=%08lx%08lx:%lu len=%u",
+        attempt + 1, static_cast<unsigned>(job.retries) + 1u, target,
+        btTypeName(type), type,
+        static_cast<unsigned long>(job.messageId.sessionId >> 32),
+        static_cast<unsigned long>(job.messageId.sessionId & 0xFFFFFFFFULL),
+        static_cast<unsigned long>(job.messageId.sequence),
+        static_cast<unsigned>(job.payloadLen));
+    if (!broadcastPacket(packet, packetLen, ADV_DURATION_MS, callback, job.context, startedUs)) {
+      LOG("BT TX command broadcast failed target=%s type=%s(0x%02x) id=%08lx%08lx:%lu",
+          target, btTypeName(type), type,
+          static_cast<unsigned long>(job.messageId.sessionId >> 32),
+          static_cast<unsigned long>(job.messageId.sessionId & 0xFFFFFFFFULL),
+          static_cast<unsigned long>(job.messageId.sequence));
+      continue;
+    }
+    callbackUsed = true;
+    if (!result.transmissionStarted) {
+      result.transmissionStarted = true;
+      result.startedUs = startedUs;
+      result.status = BtSendStatus::SENT;
+    }
+
+    const int64_t deadlineUs =
+        esp_timer_get_time() + static_cast<int64_t>(job.ackTimeoutMs) * 1000;
+    while (esp_timer_get_time() < deadlineUs) {
+      processUrgentAcks();
+      portENTER_CRITICAL(&gPendingMux);
+      bool acked = gPending.acked;
+      if (acked) memcpy(result.ackMac, gPending.ackMac, 6);
+      portEXIT_CRITICAL(&gPendingMux);
+      if (acked) {
+        result.status = BtSendStatus::ACKED;
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (result.status == BtSendStatus::ACKED) break;
+  }
+
+  portENTER_CRITICAL(&gPendingMux);
+  gPending.active = false;
+  portEXIT_CRITICAL(&gPendingMux);
+  char ack[13];
+  macToHexLower(result.ackMac, ack);
+  LOG("BT TX command result target=%s type=%s(0x%02x) id=%08lx%08lx:%lu status=%s started=%u ack=%s",
+      target, btTypeName(type), type,
+      static_cast<unsigned long>(job.messageId.sessionId >> 32),
+      static_cast<unsigned long>(job.messageId.sessionId & 0xFFFFFFFFULL),
+      static_cast<unsigned long>(job.messageId.sequence),
+      btSendStatusName(result.status), result.transmissionStarted ? 1u : 0u, ack);
+  completeJob(job, result);
+}
+
+void senderTask(void*) {
+  TxJob job;
+  for (;;) {
+    if (xQueueReceive(gTxQueue, &job, portMAX_DELAY) != pdTRUE) continue;
+    if (job.kind == TxKind::ACK) processAckJob(job);
+    else processCommandJob(job);
+  }
+}
+
+bool findFirstField(const uint8_t* tlvs, size_t tlvsLen, uint8_t type,
+                    BT_TLV::TlvFieldView& match, bool& found) {
+  found = false;
+  size_t offset = 0;
+  BT_TLV::TlvFieldView field{};
+  while (offset < tlvsLen) {
+    if (!BT_TLV::btTlvNext(tlvs, tlvsLen, offset, field)) return false;
+    if (!found && field.type == type) {
+      match = field;
+      found = true;
+    }
+  }
+  return true;
+}
+}
+
 namespace BT_TLV {
-  AdvertHandler gAdvertHandler = nullptr;
-  void btCommonSetAdvertHandler(AdvertHandler h) { gAdvertHandler = h; }
-
-  void btCommonBroadcast(const uint8_t* payload, size_t len, unsigned msDelay) {
-    if (!sBroadcastMutex) return;
-    xSemaphoreTake(sBroadcastMutex, portMAX_DELAY);
-
-#if CONFIG_BT_NIMBLE_EXT_ADV
-    NimBLEExtAdvertising* adv = NimBLEDevice::getAdvertising();
-    NimBLEExtAdvertisement ad;
-    
-    // Set your intervals (Units are 0.625ms)
-    ad.setMinInterval(80);  // 80 * 0.625 = 50ms
-    ad.setMaxInterval(120); // 120 * 0.625 = 75ms
-    
-    // Set the Data
-    ad.setManufacturerData(payload, len);
-
-    if (!adv->setInstanceData(0, ad)) {
-      LOG("EXT_ADV: setInstanceData failed, falling back");
-    } else {
-      adv->start(0, msDelay);
+bool btCommonInitSender() {
+  if (!btCryptoInit()) return false;
+  if (gSessionId == 0) {
+    gSessionId = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
+    if (gSessionId == 0) gSessionId = 1;
+  }
+  if (!gTxQueue) gTxQueue = xQueueCreate(TX_QUEUE_LEN, sizeof(TxJob));
+  if (!gTxQueue) return false;
+  if (!gSenderTask) {
+    if (xTaskCreate(senderTask, "btSender", 4096, nullptr, 3, &gSenderTask) != pdPASS) {
+      gSenderTask = nullptr;
+      return false;
     }
-#else
-    NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-    adv->setMinInterval(80); // 50ms
-    adv->setMaxInterval(120); // 75ms
-    NimBLEAdvertisementData ad;
-    std::string m((const char*)payload, len);
-    ad.setManufacturerData(m);
-    adv->setAdvertisementData(ad);
-    adv->start(msDelay); // Try later so no need to manual stop
-    // adv->start();
-    // vTaskDelay(pdMS_TO_TICKS(msDelay));
-    // adv->stop();
-#endif
+  }
+  return true;
+}
 
-    xSemaphoreGive(sBroadcastMutex);
+BtSendResult btCommonSendCommand(const uint8_t targetMac[6],
+                                 const uint8_t* payload, size_t len,
+                                 int retries, uint32_t ackTimeoutMs,
+                                 BtBeforeTransmitCb beforeTransmit,
+                                 void* context) {
+  if (!targetMac || !payload || len == 0 || len > MAX_BODY_SIZE || !gTxQueue) {
+    LOG("BT TX command invalid target=%p payload=%p len=%u queue=%p",
+        targetMac, payload, static_cast<unsigned>(len), gTxQueue);
+    return emptyResult(BtSendStatus::INVALID);
   }
 
-  class CommonScanCb : public NimBLEScanCallbacks {
-    void onResult(const NimBLEAdvertisedDevice* adv) override {
-      if (!gAdvertHandler) return;
-      std::string m = adv->getManufacturerData();
-      if (m.size() < 2) return;
-      if ((uint8_t)m[0] != 0xFF || (uint8_t)m[1] != 0xFF) return;
+  BtSendResult result = emptyResult(BtSendStatus::QUEUE_FULL);
+  TxJob job;
+  job.kind = TxKind::COMMAND;
+  memcpy(job.mac, targetMac, 6);
+  job.messageId = allocateMessageId();
+  memcpy(job.payload, payload, len);
+  job.payloadLen = static_cast<uint8_t>(len);
+  job.retries = static_cast<uint8_t>(constrain(retries, 0, 10));
+  job.ackTimeoutMs = ackTimeoutMs;
+  job.beforeTransmit = beforeTransmit;
+  job.context = context;
+  job.waiter = xTaskGetCurrentTaskHandle();
+  job.result = &result;
+  result.messageId = job.messageId;
+  char target[13];
+  macToHexLower(targetMac, target);
+  LOG("BT TX command queued target=%s type=%s(0x%02x) id=%08lx%08lx:%lu len=%u retries=%d timeout_ms=%lu",
+      target, btTypeName(payload[0]), payload[0],
+      static_cast<unsigned long>(job.messageId.sessionId >> 32),
+      static_cast<unsigned long>(job.messageId.sessionId & 0xFFFFFFFFULL),
+      static_cast<unsigned long>(job.messageId.sequence),
+      static_cast<unsigned>(len), retries, static_cast<unsigned long>(ackTimeoutMs));
 
-      gAdvertHandler((const uint8_t*)m.data() + 2, m.size() - 2, adv);
-    }
+  if (xQueueSendToBack(gTxQueue, &job, 0) != pdTRUE) {
+    LOG("BT TX command queue full target=%s type=%s(0x%02x) id=%08lx%08lx:%lu",
+        target, btTypeName(payload[0]), payload[0],
+        static_cast<unsigned long>(job.messageId.sessionId >> 32),
+        static_cast<unsigned long>(job.messageId.sessionId & 0xFFFFFFFFULL),
+        static_cast<unsigned long>(job.messageId.sequence));
+    return result;
+  }
+  ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+  LOG("BT TX command completed target=%s type=%s(0x%02x) id=%08lx%08lx:%lu status=%s",
+      target, btTypeName(payload[0]), payload[0],
+      static_cast<unsigned long>(result.messageId.sessionId >> 32),
+      static_cast<unsigned long>(result.messageId.sessionId & 0xFFFFFFFFULL),
+      static_cast<unsigned long>(result.messageId.sequence),
+      btSendStatusName(result.status));
+  return result;
+}
+
+bool btCommonQueueAck(const uint8_t targetMac[6], const BtMessageId& messageId) {
+  if (!targetMac || !gTxQueue) {
+    LOG("BT TX ack invalid target=%p queue=%p", targetMac, gTxQueue);
+    return false;
+  }
+  TxJob job;
+  job.kind = TxKind::ACK;
+  memcpy(job.mac, targetMac, 6);
+  job.messageId = messageId;
+  job.waiter = nullptr;
+  job.result = nullptr;
+  char target[13];
+  macToHexLower(targetMac, target);
+  bool queued = xQueueSendToFront(gTxQueue, &job, 0) == pdTRUE;
+  LOG("BT TX ack queue target=%s id=%08lx%08lx:%lu queued=%u",
+      target, static_cast<unsigned long>(messageId.sessionId >> 32),
+      static_cast<unsigned long>(messageId.sessionId & 0xFFFFFFFFULL),
+      static_cast<unsigned long>(messageId.sequence), queued ? 1u : 0u);
+  return queued;
+}
+
+BtSendResult btCommonSendAckAndWait(const uint8_t targetMac[6],
+                                   const BtMessageId& messageId) {
+  if (!targetMac || !gTxQueue) {
+    LOG("BT TX ack invalid target=%p queue=%p", targetMac, gTxQueue);
+    return emptyResult(BtSendStatus::INVALID);
+  }
+  BtSendResult result = emptyResult(BtSendStatus::QUEUE_FULL);
+  TxJob job;
+  job.kind = TxKind::ACK;
+  memcpy(job.mac, targetMac, 6);
+  job.messageId = messageId;
+  job.waiter = xTaskGetCurrentTaskHandle();
+  job.result = &result;
+  result.messageId = messageId;
+  char target[13];
+  macToHexLower(targetMac, target);
+  if (xQueueSendToFront(gTxQueue, &job, 0) != pdTRUE) {
+    LOG("BT TX ack queue full target=%s id=%08lx%08lx:%lu",
+        target, static_cast<unsigned long>(messageId.sessionId >> 32),
+        static_cast<unsigned long>(messageId.sessionId & 0xFFFFFFFFULL),
+        static_cast<unsigned long>(messageId.sequence));
+    return result;
+  }
+  ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+  LOG("BT TX ack completed target=%s id=%08lx%08lx:%lu status=%s",
+      target, static_cast<unsigned long>(messageId.sessionId >> 32),
+      static_cast<unsigned long>(messageId.sessionId & 0xFFFFFFFFULL),
+      static_cast<unsigned long>(messageId.sequence),
+      btSendStatusName(result.status));
+  return result;
+}
+
+void btCommonMarkAck(const uint8_t sourceMac[6], const BtMessageId& messageId) {
+  if (!sourceMac) return;
+  bool matched = false;
+  portENTER_CRITICAL(&gPendingMux);
+  if (gPending.active && sameMessageId(gPending.messageId, messageId) &&
+      (isBroadcast(gPending.targetMac) ||
+       memcmp(gPending.targetMac, sourceMac, 6) == 0)) {
+    gPending.acked = true;
+    memcpy(gPending.ackMac, sourceMac, 6);
+    matched = true;
+  }
+  portEXIT_CRITICAL(&gPendingMux);
+  char source[13];
+  macToHexLower(sourceMac, source);
+  LOG("BT RX ack source=%s id=%08lx%08lx:%lu matched=%u",
+      source, static_cast<unsigned long>(messageId.sessionId >> 32),
+      static_cast<unsigned long>(messageId.sessionId & 0xFFFFFFFFULL),
+      static_cast<unsigned long>(messageId.sequence), matched ? 1u : 0u);
+}
+
+void btCommonSetAdvertHandler(AdvertHandler handler) {
+  gAdvertHandler = handler;
+}
+
+void btBodyBegin(BtBodyBuilder& body, uint8_t msgType) {
+  body.len = 1;
+  body.data[0] = msgType;
+}
+
+bool btTlvAppend(BtBodyBuilder& body, uint8_t type, const uint8_t* value, uint8_t len) {
+  if (body.len + 2u + len > MAX_BODY_SIZE) return false;
+  body.data[body.len++] = type;
+  body.data[body.len++] = len;
+  if (len) {
+    memcpy(body.data + body.len, value, len);
+    body.len += len;
+  }
+  return true;
+}
+
+bool btTlvAppendU8(BtBodyBuilder& body, uint8_t type, uint8_t value) {
+  return btTlvAppend(body, type, &value, 1);
+}
+
+bool btTlvAppendU16(BtBodyBuilder& body, uint8_t type, uint16_t value) {
+  uint8_t raw[2] = {static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)};
+  return btTlvAppend(body, type, raw, sizeof(raw));
+}
+
+bool btTlvAppendU32(BtBodyBuilder& body, uint8_t type, uint32_t value) {
+  uint8_t raw[4] = {
+    static_cast<uint8_t>(value >> 24), static_cast<uint8_t>(value >> 16),
+    static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)
   };
+  return btTlvAppend(body, type, raw, sizeof(raw));
+}
 
-  // helper to attach common scan cb to the global scanner
-  void btCommonInstallScanCallbacks() {
-    NimBLEScan* scan = NimBLEDevice::getScan();
-    scan->setScanCallbacks(new CommonScanCb(), true);
+bool btTlvNext(const uint8_t* tlvs, size_t tlvsLen, size_t& offset,
+               TlvFieldView& field) {
+  if (!tlvs || offset + 2 > tlvsLen) return false;
+  uint8_t len = tlvs[offset + 1];
+  if (offset + 2u + len > tlvsLen) return false;
+  field.type = tlvs[offset];
+  field.len = len;
+  field.value = tlvs + offset + 2;
+  offset += 2u + len;
+  return true;
+}
+
+bool btTlvReadRequiredU8(const uint8_t* tlvs, size_t len, uint8_t type, uint8_t& out) {
+  TlvFieldView field{};
+  bool found = false;
+  if (!findFirstField(tlvs, len, type, field, found) || !found || field.len != 1) return false;
+  out = field.value[0];
+  return true;
+}
+
+bool btTlvReadRequiredU16(const uint8_t* tlvs, size_t len, uint8_t type, uint16_t& out) {
+  TlvFieldView field{};
+  bool found = false;
+  if (!findFirstField(tlvs, len, type, field, found) || !found || field.len != 2) return false;
+  out = (static_cast<uint16_t>(field.value[0]) << 8) | field.value[1];
+  return true;
+}
+
+bool btTlvReadRequiredU32(const uint8_t* tlvs, size_t len, uint8_t type, uint32_t& out) {
+  TlvFieldView field{};
+  bool found = false;
+  if (!findFirstField(tlvs, len, type, field, found) || !found || field.len != 4) return false;
+  out = (static_cast<uint32_t>(field.value[0]) << 24) |
+        (static_cast<uint32_t>(field.value[1]) << 16) |
+        (static_cast<uint32_t>(field.value[2]) << 8) | field.value[3];
+  return true;
+}
+
+bool btTlvReadRequiredBytes(const uint8_t* tlvs, size_t len, uint8_t type,
+                            const uint8_t*& out, uint8_t& outLen) {
+  TlvFieldView field{};
+  bool found = false;
+  if (!findFirstField(tlvs, len, type, field, found) || !found) return false;
+  out = field.value;
+  outLen = field.len;
+  return true;
+}
+
+bool btTlvReadRequiredU16Array(const uint8_t* tlvs, size_t len, uint8_t type,
+                               uint16_t* out, size_t maxCount, size_t& outCount) {
+  const uint8_t* bytes = nullptr;
+  uint8_t bytesLen = 0;
+  outCount = 0;
+  if (!btTlvReadRequiredBytes(tlvs, len, type, bytes, bytesLen) || bytesLen % 2 != 0) {
+    return false;
   }
+  outCount = bytesLen / 2;
+  if (outCount > maxCount) return false;
+  for (size_t i = 0; i < outCount; ++i) {
+    out[i] = (static_cast<uint16_t>(bytes[i * 2]) << 8) | bytes[i * 2 + 1];
+  }
+  return true;
+}
 
+class CommonScanCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* adv) override {
+    if (!gAdvertHandler) return;
+    const std::vector<uint8_t>& bytes = adv->getPayload();
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+      uint8_t adLen = bytes[offset];
+      if (adLen == 0 || offset + adLen >= bytes.size()) break;
+      if (bytes[offset + 1] == 0xFF && adLen >= 3 &&
+          bytes[offset + 2] == 0xFF && bytes[offset + 3] == 0xFF) {
+        gAdvertHandler(bytes.data() + offset + 4, adLen - 3, adv);
+        break;
+      }
+      offset += adLen + 1;
+    }
+  }
+};
+
+void btCommonInstallScanCallbacks() {
+  NimBLEDevice::getScan()->setScanCallbacks(new CommonScanCallbacks(), false);
+}
+}
+
+void extract_src_mac(const NimBLEAdvertisedDevice* adv, uint8_t outMac[6]) {
+  NimBLEAddress address = adv->getAddress();
+  address.reverseByteOrder();
+  memcpy(outMac, address.getVal(), 6);
+}
+
+size_t make_bt_packet(const uint8_t targetMac[6], const BtMessageId& messageId,
+                      const uint8_t* payload, size_t payloadLen, uint8_t* out) {
+  if (!targetMac || !payload || !out || payloadLen == 0 ||
+      payloadLen > BT_TLV::MAX_BODY_SIZE) {
+    return 0;
+  }
+  size_t pos = 0;
+  out[pos++] = 0xFF;
+  out[pos++] = 0xFF;
+  memcpy(out + pos, targetMac, 6);
+  pos += 6;
+  for (int i = 0; i < 8; ++i) {
+    out[pos++] = static_cast<uint8_t>(messageId.sessionId >> (56 - i * 8));
+  }
+  out[pos++] = static_cast<uint8_t>(messageId.sequence >> 24);
+  out[pos++] = static_cast<uint8_t>(messageId.sequence >> 16);
+  out[pos++] = static_cast<uint8_t>(messageId.sequence >> 8);
+  out[pos++] = static_cast<uint8_t>(messageId.sequence);
+
+#if USE_BT_CRYPTO
+  size_t encryptedLen = 0;
+  if (!btEncryptPayload(payload, payloadLen, targetMac, messageId,
+                        out + pos, encryptedLen)) {
+    return 0;
+  }
+  pos += encryptedLen;
+#else
+  memcpy(out + pos, payload, payloadLen);
+  pos += payloadLen;
+#endif
+  return pos;
+}
+
+bool parse_bt_packet_header(const uint8_t* data, size_t len, uint8_t targetMac[6],
+                            BtMessageId& messageId, const uint8_t*& payload,
+                            size_t& payloadLen) {
+  if (!data || len < PACKET_HEADER_SIZE) return false;
+  memcpy(targetMac, data, 6);
+  messageId.sessionId = 0;
+  for (int i = 0; i < 8; ++i) {
+    messageId.sessionId = (messageId.sessionId << 8) | data[6 + i];
+  }
+  messageId.sequence = (static_cast<uint32_t>(data[14]) << 24) |
+                       (static_cast<uint32_t>(data[15]) << 16) |
+                       (static_cast<uint32_t>(data[16]) << 8) | data[17];
+
+  const uint8_t* encoded = data + PACKET_HEADER_SIZE;
+  size_t encodedLen = len - PACKET_HEADER_SIZE;
+#if USE_BT_CRYPTO
+  static uint8_t decrypted[BT_TLV::MAX_BODY_SIZE];
+  size_t decryptedLen = 0;
+  if (!btDecryptPayload(encoded, encodedLen, targetMac, messageId,
+                        decrypted, decryptedLen)) {
+    return false;
+  }
+  payload = decrypted;
+  payloadLen = decryptedLen;
+#else
+  payload = encoded;
+  payloadLen = encodedLen;
+#endif
+  return payloadLen > 0;
 }

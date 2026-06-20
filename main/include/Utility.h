@@ -7,20 +7,29 @@
   #define LOG(fmt, ...) do {} while(0)
 #endif
 
-constexpr int MAX_WORKER_COUNT = 16;
+constexpr int MAX_WORKER_COUNT = 8;
 constexpr int MAX_POTS_PER_DEVICE = 16;
+constexpr size_t UTF8_NAME_MAX_BYTES = 64;
+constexpr size_t UTF8_NAME_STORAGE_BYTES = UTF8_NAME_MAX_BYTES + 1;
 
-const String& getWifiMacLast6();
-const String& getBtMac();
-bool macFromHexString(const String &macHex, uint8_t out[6]);
+// Parse a 12-character hex MAC string (no separators) into 6 bytes.
+// Accepts only exactly 12 hex characters (0-9 A-F a-f).
+bool macFromHexString(const char *macHex, uint8_t out[6]);
+size_t copyUtf8Truncated(const char *src, char *dst, size_t dstSize);
 
-// Time helpers: set user-provided time (seconds since midnight) and query
-// current time of day computed using millis() and saved reference.
-void setUserTimeOfDaySec(uint32_t secOfDay);
+// Format helpers: produce lower-case hex strings. Buffers must include
+// space for the terminating NUL (`out[13]` for full MAC, `out[7]` for last6`).
+void macToHexLower(const uint8_t mac[6], char out[13]);
+void getBtMacHex(char out[13]);
+void getWifiMacLast6Hex(char out[7]);
+
+void initializeClockFromSettings();
+bool isClockValid();
+bool setUserTimeOfDaySec(uint32_t secOfDay);
 uint32_t getCurrentTimeOfDaySec();
-// Epoch-based time helpers
 void setUserEpoch(uint64_t epochSec);
 uint64_t getCurrentEpochSec();
-// Attempt NTP sync; returns true on success
 bool trySyncNTP(unsigned long timeoutMs = 10000);
-uint32_t calculateSleepSec(unsigned long now_s);
+
+uint8_t calculateBatteryPercent(uint16_t batteryMv);
+uint16_t getCorrectedSoilMoisture(uint16_t batteryMv, uint16_t sensorMv);

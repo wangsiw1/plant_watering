@@ -1,12 +1,14 @@
 #pragma once
-#include <vector>
-#include <Arduino.h>
-#include "config.h"
 
-void startWatering(const std::vector<const WorkerConfig*>& targets);
+#include <stdint.h>
 
-// Callbacks invoked by bluetooth main when commands are sent/acked/completed
-void onCommandSent(const uint8_t mac[6], uint16_t nonce);
-void onCommandAcked(const uint8_t mac[6], uint16_t nonce);
-void onWorkerCompleted(const uint8_t mac[6]);
+#include "Utility.h"
 
+void wateringManagerInit();
+bool wateringQueueManual(const uint8_t mac[6], uint16_t potMask,
+                         const uint16_t* durations, size_t durationCount);
+bool wateringProcessOneManual();
+bool wateringExecuteWorker(const uint8_t mac[6], uint16_t potMask,
+                           const uint16_t* durations, size_t durationCount,
+                           bool usePump);
+void wateringNotifyCompleted(const uint8_t mac[6], uint16_t potMask);

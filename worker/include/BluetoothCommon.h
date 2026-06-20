@@ -1,113 +1,109 @@
 #pragma once
-#include <stdint.h>
-#include <stddef.h>
-#include <vector>
+
 #include <NimBLEDevice.h>
+#include <stddef.h>
+#include <stdint.h>
 
-// TLV types used across main and worker
-namespace BT_TLV {
-  constexpr uint8_t TYPE_MAC = 0x01;      // 6 bytes
-  constexpr uint8_t TYPE_SOIL = 0x02;     // 2 bytes (big-endian)
-  constexpr uint8_t TYPE_BATT = 0x03;     // 1 byte
-    // TYPE_TARGET removed: use TYPE_MAC (0x01) to carry target MAC in command TLVs
-  constexpr uint8_t TYPE_NONCE = 0x11;    // 2 bytes nonce
-  // TYPE_PAYLOAD removed: command fields are now TLV fields themselves
-  constexpr uint8_t TYPE_ACK = 0x20;      // 2 bytes nonce ack
-
-  // Command TLV types (merged from previous BT_CMD namespace) - choose values
-  // outside the sensor/status namespace to avoid collisions.
-  constexpr uint8_t TYPE_CMD_PROBE = 0x30; // probe request (len=0)
-  constexpr uint8_t TYPE_CMD_SLEEP = 0x31; // sleep request (len=4: seconds)
-  constexpr uint8_t TYPE_CMD_WATER = 0x32; // water request (len=2: duration seconds)
-  constexpr uint8_t TYPE_STATUS = 0x40;   // compact STATUS msg (worker -> main)
-  constexpr uint8_t TYPE_CONFIG = 0x41;   // unpaired worker announces potCount
-}
-
-// Shared scan callback wiring
-namespace BT_TLV {
-  using AdvertHandler = void(*)(const uint8_t* data, size_t len, const NimBLEAdvertisedDevice* adv);
-  extern AdvertHandler gAdvertHandler;
-  void btCommonSetAdvertHandler(AdvertHandler h);
-
-  // Shared broadcast helper (used by main and worker)
-  void btCommonBroadcast(const uint8_t* payload, size_t len, unsigned msDelay=100);
-  // Install common scan callbacks on the global NimBLE scanner
-  void btCommonInstallScanCallbacks();
-
-  // Command sender/queue shared between main and worker
-  using OnCommandSentCb = void(*)(const uint8_t mac[6], uint16_t nonce);
-
-  // Initialize the common sender (creates queue and sender task). Safe to call multiple times.
-  bool btCommonInitSender();
-
-  // Queue a command for sending. Returns true if queued.
-  bool btCommonQueueCommand(const uint8_t target_mac[6], const uint8_t* payload, size_t len, int retries, unsigned timeoutMs);
-  
-  // Queue a ACK for sending. Returns true if queued.
-  bool btCommonQueueAck(const uint8_t target_mac[6], uint16_t nonce);
-
-  // Mark a nonce as acknowledged (called when an ACK TLV observed)
-  void btCommonMarkAck(uint16_t nonce);
-
-  // Register callback invoked when a command is actually sent (nonce allocated). Optional.
-  void btCommonRegisterOnCommandSent(OnCommandSentCb cb);
-}
-
-// (BT_CMD removed; commands are TLV fields under BT_TLV)
-
-/*
- TLV envelope and usage notes (see DESIGN.md for a fuller explanation):
-
- - Advertisement envelope: use BLE Advertisement "Manufacturer Specific Data" (AD type 0xFF).
-   Prepend a 2-byte Company Identifier (little-endian). You may use 0xFFFF for local/test usage.
-
- - TLV format: each field is [type:1][len:1][value:len]. Multi-byte integers are big-endian on the wire.
-
- - Size: advertisement payload (CompanyID + TLV bytes) must be <= 31 bytes. Use scan-response or multiple adverts
-   only when necessary.
-
- - Recommended TLV fields (already defined above):
-   TYPE_MAC (0x01)  : 6 bytes, worker MAC (used in worker -> main status adverts)
-   TYPE_SOIL (0x02) : 2 bytes, soil ADC (uint16, 0..4095)
-   TYPE_BATT (0x03) : 1 byte, battery %
-  // - TARGET is carried using TYPE_MAC (0x01): 6 bytes, target MAC in a command
-  TYPE_NONCE (0x11): 2 bytes nonce (uint16) to correlate requests and ACKs
-  (legacy TYPE_PAYLOAD removed) — commands are TLV fields themselves
-  TYPE_ACK (0x20)  : 2 bytes nonce used by worker to ACK commands
-
- - Command envelope (main -> worker): include TYPE_MAC (target) and TYPE_NONCE. Then include either
-  TYPE_CMD (1 byte via TYPE_PAYLOAD or a dedicated byte inside TYPE_PAYLOAD) or a structured payload.
-
- - ACK flow: worker replies by broadcasting an advertisement containing TYPE_ACK with the nonce.
-   The main marks the command acknowledged on receipt of matching nonce.
-
-*/
-
-const uint8_t BROADCAST_MAC[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-
-void extract_src_mac(const NimBLEAdvertisedDevice* adv, uint8_t out_mac[6]);
-
-// Legacy TLV parsing helpers removed — the worker codebase uses compact
-// packets (CompanyID + TargetMAC(6) + Nonce(2) + payload...).
-size_t make_compact_packet(const uint8_t target_mac[6], uint16_t nonce, const uint8_t* payload, size_t payload_len, uint8_t* out, bool encrypt);
-
-// Compact packet parsing helpers (new format: CompanyID + TargetMAC(6) + Nonce(2) + Payload...)
-bool parse_compact_packet_header(const uint8_t* data, size_t len, uint8_t out_target_mac[6], uint16_t &nonce, const uint8_t*& payload_ptr, size_t &payload_len);
-
-// Placeholder encryption API: encrypt/decrypt the bytes AFTER the CompanyID prefix.
-// New signature accepts target MAC and nonce so AEAD IV can be derived deterministically.
-// Returns true on success and fills out_len with the output length (ciphertext+tag or plaintext).
-bool btEncryptPayload(const uint8_t* in, size_t in_len, const uint8_t target_mac[6], uint16_t nonce, uint8_t* out, size_t &out_len);
-bool btDecryptPayload(const uint8_t* in, size_t in_len, const uint8_t target_mac[6], uint16_t nonce, uint8_t* out, size_t &out_len);
-
-// Compile-time flag to enable BT encryption. Defaults to enabled (AES-GCM).
 #ifndef USE_BT_CRYPTO
 #define USE_BT_CRYPTO 1
 #endif
 
-  // Feature flag: enable extended adverts (requires host/stack support). Default: 0 (legacy)
 #ifndef USE_EXT_ADV
 #define USE_EXT_ADV 0
 #endif
 
-// Command helpers migrated to compact payload interpretation.
+#if !USE_EXT_ADV
+#error "Bluetooth TLV protocol requires USE_EXT_ADV=1"
+#endif
+
+struct BtMessageId {
+  uint64_t sessionId;
+  uint32_t sequence;
+};
+
+enum class BtSendStatus : uint8_t {
+  INVALID,
+  QUEUE_FULL,
+  TRANSMIT_FAILED,
+  SENT,
+  ACKED
+};
+
+struct BtSendResult {
+  BtSendStatus status;
+  BtMessageId messageId;
+  bool transmissionStarted;
+  int64_t startedUs;
+  uint8_t ackMac[6];
+};
+
+using BtBeforeTransmitCb = void(*)(void* context);
+
+namespace BT_TLV {
+  constexpr size_t MAX_BODY_SIZE = 64;
+  constexpr uint8_t TYPE_ACK = 0x20;
+  constexpr uint8_t TYPE_CMD_PROBE = 0x30;
+  constexpr uint8_t TYPE_CMD_SLEEP = 0x31;
+  constexpr uint8_t TYPE_CMD_WATER = 0x32;
+  constexpr uint8_t TYPE_STATUS = 0x40;
+  constexpr uint8_t TYPE_CONFIG = 0x41;
+  constexpr uint8_t TYPE_EVENT_WATER_DONE = 0x42;
+
+  constexpr uint8_t FIELD_BATT = 0x01;
+  constexpr uint8_t FIELD_POT_COUNT = 0x02;
+  constexpr uint8_t FIELD_SOIL_LIST = 0x03;
+  constexpr uint8_t FIELD_SLEEP_SEC = 0x04;
+  constexpr uint8_t FIELD_POT_MASK = 0x05;
+  constexpr uint8_t FIELD_DURATION_LIST = 0x06;
+
+  struct TlvFieldView {
+    uint8_t type;
+    uint8_t len;
+    const uint8_t* value;
+  };
+
+  struct BtBodyBuilder {
+    uint8_t data[MAX_BODY_SIZE];
+    size_t len;
+  };
+
+  using AdvertHandler = void(*)(const uint8_t* data, size_t len,
+                                const NimBLEAdvertisedDevice* adv);
+
+  bool btCommonInitSender();
+  void btCommonSetAdvertHandler(AdvertHandler handler);
+  void btCommonInstallScanCallbacks();
+
+  BtSendResult btCommonSendCommand(const uint8_t targetMac[6],
+                                   const uint8_t* payload, size_t len,
+                                   int retries, uint32_t ackTimeoutMs,
+                                   BtBeforeTransmitCb beforeTransmit = nullptr,
+                                   void* context = nullptr);
+  bool btCommonQueueAck(const uint8_t targetMac[6], const BtMessageId& messageId);
+  BtSendResult btCommonSendAckAndWait(const uint8_t targetMac[6],
+                                     const BtMessageId& messageId);
+  void btCommonMarkAck(const uint8_t sourceMac[6], const BtMessageId& messageId);
+
+  void btBodyBegin(BtBodyBuilder& body, uint8_t msgType);
+  bool btTlvAppend(BtBodyBuilder& body, uint8_t type, const uint8_t* value, uint8_t len);
+  bool btTlvAppendU8(BtBodyBuilder& body, uint8_t type, uint8_t value);
+  bool btTlvAppendU16(BtBodyBuilder& body, uint8_t type, uint16_t value);
+  bool btTlvAppendU32(BtBodyBuilder& body, uint8_t type, uint32_t value);
+  bool btTlvNext(const uint8_t* tlvs, size_t tlvsLen, size_t& offset, TlvFieldView& field);
+  bool btTlvReadRequiredU8(const uint8_t* tlvs, size_t tlvsLen, uint8_t type, uint8_t& out);
+  bool btTlvReadRequiredU16(const uint8_t* tlvs, size_t tlvsLen, uint8_t type, uint16_t& out);
+  bool btTlvReadRequiredU32(const uint8_t* tlvs, size_t tlvsLen, uint8_t type, uint32_t& out);
+  bool btTlvReadRequiredBytes(const uint8_t* tlvs, size_t tlvsLen, uint8_t type,
+                              const uint8_t*& out, uint8_t& outLen);
+  bool btTlvReadRequiredU16Array(const uint8_t* tlvs, size_t tlvsLen, uint8_t type,
+                                 uint16_t* out, size_t maxCount, size_t& outCount);
+}
+
+extern const uint8_t BROADCAST_MAC[6];
+
+void extract_src_mac(const NimBLEAdvertisedDevice* adv, uint8_t outMac[6]);
+size_t make_bt_packet(const uint8_t targetMac[6], const BtMessageId& messageId,
+                      const uint8_t* payload, size_t payloadLen, uint8_t* out);
+bool parse_bt_packet_header(const uint8_t* data, size_t len, uint8_t outTargetMac[6],
+                            BtMessageId& messageId, const uint8_t*& payload,
+                            size_t& payloadLen);

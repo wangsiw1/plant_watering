@@ -5,3 +5,4 @@
 void battBegin();
 void readBattLevel();
 uint8_t getBattLevel();
+uint16_t getBattMv();

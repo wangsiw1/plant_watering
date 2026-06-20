@@ -31,12 +31,10 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
   - Enable/disable audo watering function based on schedule and soild moisture
   - Apply and save all inputs
   - Add worker node using Bluetooth MAC address
-  - List of added worker nodes, each node has:
-    - Coneection status, last watering time, and battery level
-    - Soil moisture data and latest updated time
-    - Moisture threshold of when should valve be activated to water the plant
-    - Watering duration that how long a valve should be activated to water the palnt
-    - Manual solenoid valve activation
+  - List of added worker nodes grouped by worker device, each worker shows:
+    - Battery level, last sync time, and RSSI
+    - Worker name input
+    - For each pot on that worker: soil moisture, last watering time, threshold, watering duration, pot name, and manual watering button
 
 ### Details
 
@@ -65,20 +63,22 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
   - Major button to start auto watering
   - ID (12 hex digits of Bluetooth MAC address, upper or lower cases) input and add button to add worker node to list
   - Major button to apply changes to inputs
-  - List of added worker nodes, each node has:
-    - Status: Not connected/Connected, last valve activation time (days/hours/minuts ago), Battery: \<percentage\>
-    - Soil moisture data reading (0-4095 analog), last update time (days/hours/minuts ago)
-    - Plant name input (64 characters max)
-    - Moisture threshold input (0-4095 analog range, with hardcoded min/max)
-    - Watering duration input (seconds to water, with hardcoded min/max)
-    - Button to manuall activate solenoid valve
-    - Remove button to remove this node from list
+  - List of added worker nodes grouped by worker device:
+    - Worker header shows MAC address, battery percentage, last sync time, and RSSI
+    - Worker name input
+    - Remove button removes the whole worker device from the list
+    - Each pot row shows soil moisture data, last watering time, threshold, watering duration, and a manual watering button
+    - Pot name and worker name are stored in fixed 65-byte buffers, so the web UI clamps names to 64 UTF-8 bytes total, which is about 64 ASCII characters or about 16 4-byte emoji/CJK characters
   - Callapsed log list and system health info
 
 - Hardware
-  - ESP32 C3 Super Mini
-  - Pump activation pin: GPIO 1
-  - Water tank level sensor reading pin: GPIO 3
+  - Main firmware supports multiple hardware targets selected at build time
+  - `HW_TARGET_V1_REV_A`
+    - Pump activation pin: GPIO 1
+    - Water tank level sensor reading pin: GPIO 3
+  - `HW_TARGET_V2_REV_A`
+    - Pump activation pin: GPIO 3
+    - Water tank level sensor reading pin: GPIO 4
 
 - Logics
   - Time
@@ -100,7 +100,8 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
       - Only activate if water tank level is not low
       - Only activate during active time range
       - Only activate after watering interval
-      - Only activate if one or more reported soil moisture below threshold
+      - Only activate if one or more reported soil moisture is above threshold
+      - Soil sensor ADC value increases as the soil gets drier
   - Watering interval
     - Cooldown timer that no watering triggers
     - Starts from end of last watering
@@ -109,7 +110,8 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
     - Default: 3600 seconds (1 hour)
   - Data sync interval
     - Cooldown timer until next data change between main and worker nodes
-    - Worker nodes go to deep sleep during this interval, only wake up after timer
+    - In auto mode, after each sync/watering cycle main sends the next sleep delay and workers go to deep sleep for this interval
+    - In manual mode, main does not send sleep commands, so paired workers stay awake waiting for commands and unpaired workers keep advertising periodically
     - Minimum: 60 seconds
     - Maximum: 2,419,200 seconds (28 days)
     - Default: 3600 seconds (1 hour)
@@ -124,23 +126,29 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
       - Battery level
   - Bluetooth
     - Broadcast with ACKs
-    - 31 bytes max payload for classic advertising
+    - Extended advertising is required
   - Workflow
     - Main node
       - Always on
       - Host HTTP server
       - Monitor water tank level sensor
-      - Listen to any new worker broadcasting to join
+      - Only accepts status updates from worker MAC addresses that have already been added in the web UI
       - Maintain time
+      - In manual mode, probe configured workers about every 30 seconds and do not send sleep commands afterward
+      - In auto mode, probe workers on the configured data sync interval, evaluate watering, then send sleep commands for the next cycle
     - Worker node
-      - Always on by deafult, broadcasting data periodically with target node Bluetooth MAC FF:FF:FF:FF:FF:FF. 
-      - After connecting to main node, receive sleep time and go to sleep, only wake up after and wait for main node probe to broadcast data
+      - When not paired with a main node, advertise status periodically with target node Bluetooth MAC FF:FF:FF:FF:FF:FF
+      - When paired and main auto mode is off, stay awake waiting for commands from main
+      - When paired and main sends a sleep command, go to deep sleep until the requested timer expires, then wake and wait for the next probe
       - Monitor soil moisture sensor
     - Worker node connection procedure
-      - Not exactly connection, but as long as main node is able to communicate with worker, mark it as connected
+      - Not exactly connection, but as long as main node is able to communicate with a configured worker, mark it as connected
       - Worker node starts broadcasting data periodically after power up
+      - Main node ignores worker status messages until that worker MAC address is added to the list
+      - The first accepted command teaches the worker the main node MAC address
       - If Bluetooth MAC address of worker node is added to list in main node, main node should proceed to standard device timing coordination
     - Device timing coordination procedure
+      - This procedure only runs in auto mode
       - Main node calculates next data sync time
       - With calculated delay time for each worker node, all worker should wake up around similar time
       - After watering procedure done, main node should calculate new time and send to workers, then workers go to sleep
@@ -148,19 +156,18 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
         2. Worker broadcasts ACK
         3. Worker go to sleep
     - Data sync procedure
-      - After data sync interval plus extra small delay, assuming all worker nodes wake up, for each worker in the worker list:
+      - In auto mode, after data sync interval plus extra small delay, assuming all worker nodes wake up, for each worker in the worker list:
         1. Main node broadcasts probe to the worker
         2. Worker listens and broadcasts data
         3. Main node broadcasts ACK
+      - In manual mode, main still probes configured workers periodically, but skips the later sleep-coordination step
     - Watering procedure
       - After data sync, if all conditions meet the watering requirement
-        1. Main node activates water pump
-        2. For each node that soil moisture goes below the threshold:
-          2.1 Main node broadcasts watering duration to worker
-          2.2 Worker broadcasts ACK and activates valve
-          2.3 Worker stops valve after duration and broadcasts back same watering command
-          2.4 Main node broadcasts ACK
-        3. Main node stops pump and proceeds to device timing coordination procedure
+        1. For each worker with dry pots, main starts its water-command advertisement
+        2. Main starts the pump as soon as that advertisement has started
+        3. Worker completes its ACK advertisement and activates valves sequentially
+        4. Worker stops the valves and sends `TYPE_EVENT_WATER_DONE`
+        5. Main ACKs completion, stops the pump, and continues coordination
       - If conditions not meet, skip to device timing coordination procedure
     - Worker node retry and disconnect procudure
       - Either main node or worker node is not responding to message after certain time lenght, retry 3 times
@@ -195,65 +202,67 @@ The system is designed to run within a home LAN, not exposed to internet directl
 
 TBD
 
-## Quick reference
+## Bluetooth Protocol
 
-## Bluetooth payload format (compact + AEAD)
+The main and worker firmware must be deployed as a matched pair. The protocol requires
+BLE extended advertising; there is no legacy-advertising or plaintext fallback.
 
-This project moved from a TLV-first encoding to a compact, fixed-position header to
-reduce per-field overhead and allow multiple soil readings inside a single advertisement.
-When extended advertising is available the full STATUS payload can be sent in one advert;
-otherwise the compact layout minimizes fragmentation over legacy 31-byte adverts.
+### Envelope
 
-Envelope
-- 2 bytes: Company Identifier (little-endian). For local testing use `0xFFFF`.
-- Followed by payload beginning at TargetMAC (see compact layout below).
+- Company identifier: 2 bytes, `0xFFFF` for this project.
+- Target MAC: 6 bytes, or `FF:FF:FF:FF:FF:FF` for an unpaired status broadcast.
+- Session ID: 8-byte big-endian random value generated at every boot.
+- Sequence: 4-byte big-endian counter, nonzero and unique within the boot session.
+- Encrypted body: AES-GCM ciphertext followed by a 16-byte authentication tag.
 
-Compact packet layout (preferred)
-- CompanyID (2 bytes, little-endian)
-- TargetMAC (6 bytes) — MAC of the recipient, or `FF:FF:FF:FF:FF:FF` for broadcast
-- Nonce (2 bytes, big-endian) — per-packet nonce for correlation
-- MsgPayload (remaining bytes) — begins with MsgType (1 byte) followed by type-specific fields
+The authenticated body starts with one message-type byte. Remaining values use TLV
+fields encoded as `[field type:1][length:1][value:length]`; integers are big-endian.
 
-MsgType values
-- `0x30` TYPE_CMD_PROBE  — probe (no payload)
-- `0x31` TYPE_CMD_SLEEP  — [TYPE_CMD_SLEEP][4-byte seconds BE]
-- `0x32` TYPE_CMD_WATER  — compact: [TYPE_CMD_WATER][PotMask(2)][DurationArray(2*N)]
-  - PotMask: 16-bit bitmask where bit `i` corresponds to pot `i`.
-  - DurationArray: N 16-bit big-endian seconds, where N is the count of set bits in PotMask.
-    Durations are listed in increasing pot-index order for the set bits.
-    Example: if PotMask has bits for pots 0, 2, 3, then DurationArray = [dur_0, dur_2, dur_3].
-- `0x40` TYPE_STATUS    — [TYPE_STATUS][Battery(1)][PotCount(1)][Soil1(2), Soil2(2), ...]
-- `0x41` TYPE_CONFIG    — announce potCount when unpaired
-- `0x20` TYPE_ACK       — acknowledge (main/worker will mark pending nonce)
+### Messages
 
-Encryption (AEAD)
-- When `USE_BT_CRYPTO` is enabled the MsgPayload (bytes after TargetMAC+Nonce)
-  is encrypted with AES-GCM and the 16-byte authentication tag is appended.
-- IV derivation: IV = first 12 bytes of HMAC-SHA256(network_key, target_mac || nonce || "btiv").
-- Implemented in `btEncryptPayload`/`btDecryptPayload` (mbedTLS GCM). The network key
-  in code is a placeholder; provision keys securely in production (NVS/provisioning).
-- `parse_compact_packet_header()` attempts decryption and on failure returns the raw
-  payload. A reversed-MAC fallback is attempted to work around byte-order mismatches.
+- `0x20 TYPE_ACK`: no TLV fields. It repeats the acknowledged session and sequence.
+- `0x30 TYPE_CMD_PROBE`: no TLV fields.
+- `0x31 TYPE_CMD_SLEEP`: `FIELD_SLEEP_SEC` as one `uint32`.
+- `0x32 TYPE_CMD_WATER`: `FIELD_POT_MASK` plus `FIELD_DURATION_LIST`.
+- `0x40 TYPE_STATUS`: battery, pot count, and the ordered `uint16` soil list.
+- `0x41 TYPE_CONFIG`: reserved placeholder; it is not currently transmitted.
+- `0x42 TYPE_EVENT_WATER_DONE`: the completed pot mask.
 
-Extended Advertising
-- When `USE_EXT_ADV` is enabled and stack support is present the system will use
-  extended advertising (`NimBLEExtAdvertising`) to avoid 31-byte limits. Otherwise
-  it falls back to legacy advertising.
+ACK matching uses source MAC, session ID, and sequence. For an unpaired broadcast status,
+the first authenticated ACK with the matching message ID completes the transaction but
+does not pair the worker.
 
-Legacy TLV compatibility
-- The project retains TLV parsing helpers for interoperability. When a command is
-  queued via `btCommonQueueCommand()` the sender will convert TLV -> compact only
-  when the queued buffer looks exactly like a TLV payload (the length byte must
-  exactly match the remaining bytes). This prevents mis-detection where a compact
-  payload's data byte (e.g., battery) could be mistaken for a TLV length.
+### Encryption
 
-Implementation notes
-- `parse_compact_packet_header()` (in `src/bluetooth_common.cpp`) takes data starting
-  after the CompanyID and returns the target MAC, nonce and a pointer/length to the
-  (possibly decrypted) MsgPayload.
-- AES-GCM code and IV derivation live in `src/bluetooth_crypto.cpp`.
-- The web UI and `WorkerNode` structures were updated to store per-device arrays
-  of soils and `potCount` so the compact STATUS payload maps directly to the UI.
+AES-GCM uses the target MAC, session ID, and sequence as authenticated header data.
+The 12-byte IV is the first 12 bytes of:
+
+`HMAC-SHA256(network_key, target_mac || session_id || sequence || "btiv")`
+
+Decryption failure rejects the packet. The current compiled network key is a development
+placeholder and must be provisioned securely for a production deployment.
+
+### Runtime Flow
+
+- One sender task owns the advertising instance for the complete advertisement lifetime.
+  ACK jobs are inserted at the front of its bounded queue.
+- Main probes one configured worker at a time, requires the probe ACK, and then waits for
+  a newer status generation before using that worker's readings.
+- Main ignores and does not ACK status from workers absent from its configured list.
+- Worker learns a main MAC only from a valid supported command, never from an ACK.
+- Worker scan callbacks only validate and queue commands. A control task sends the ACK,
+  waits for its advertisement to finish, and then performs watering or deep sleep.
+- For automatic watering, the pump starts when the water-command advertisement actually
+  starts. A missing command ACK does not stop the pump; completion, timeout, or low tank
+  level ends the watering window.
+- Sleep commands are transactional. A worker enters deep sleep only after its ACK
+  advertisement has completed.
+
+## Intentional Placeholders
+
+- `TYPE_CONFIG`, heap monitoring, and the incomplete 16-pot hardware target remain.
+- Main and worker retain separate copies of Bluetooth common and crypto sources so each
+  firmware directory remains independently manageable.
 
 
 

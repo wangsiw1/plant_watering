@@ -1,67 +1,71 @@
 #pragma once
+
 #include <Arduino.h>
 #include "Utility.h"
 
-typedef enum {
-  READY, 
+enum State : uint8_t {
+  READY,
   SYNCING,
   WATERING,
   SLEEPING
-} State;
+};
 
 struct Settings {
-  String name;
+  char name[UTF8_NAME_STORAGE_BYTES];
   uint32_t waterInterval;
   uint32_t dataSyncInterval;
   uint32_t activeStart;
   uint32_t activeEnd;
-  // Time maintenance: store user-provided time of day (seconds since midnight)
-  // and the millis() value when it was saved. Use these to compute current
-  // time as: savedTimeOfDay + (millis() - savedMillis)/1000 (wrap-safe).
-  uint32_t savedTimeOfDaySec;
-  uint64_t savedMillis;
-  // Absolute time storage (seconds since Unix epoch, local = UTC + tz offset)
-  uint64_t savedEpochSec;      // 64-bit unsigned epoch seconds
-  uint64_t savedEpochMillis; // millis() when epoch was captured
-  int16_t tzOffsetMinutes;     // minutes east of UTC (e.g. +60 = +1h)
+  uint64_t savedUtcSec;
+  uint64_t lastWateringUtcSec;
+  int16_t tzOffsetMinutes;
 };
 
-// Configured worker node entry persisted in NVS. Main maintains a list of these workers
-// which is edited via the web UI (add/remove). Each entry contains MAC, moisture threshold
-// and watering duration (seconds).
 struct WorkerConfig {
   uint8_t mac[6];
-  uint16_t threshold; // soil ADC threshold (lower means drier)
-  uint16_t duration;  // watering duration in seconds
-  uint8_t potIndex;   // which pot on the device this config applies to (flattened per-pot list)
-  char name[32];
+  char workerName[UTF8_NAME_STORAGE_BYTES];
+  uint8_t potCount;
+  uint16_t thresholds[MAX_POTS_PER_DEVICE];
+  uint16_t durations[MAX_POTS_PER_DEVICE];
+  char potName[MAX_POTS_PER_DEVICE][UTF8_NAME_STORAGE_BYTES];
 };
 
-extern WorkerConfig workerList[MAX_WORKER_COUNT];
-extern int workerListCount;
-extern State state;
+struct RuntimeSnapshot {
+  State state;
+  bool autoEnabled;
+  int64_t lastDataSyncUs;
+  int64_t nextDataSyncUs;
+};
 
-// Worker list management
-bool addWorkerByHex(const String &macHex, uint16_t threshold, uint16_t duration, const String &name = String());
-// Remove all per-pot configs for a worker (by MAC)
-bool removeWorkerByHex(const String &macHex);
-bool updateWorkerByHex(const String &macHex, uint16_t threshold, uint16_t duration, const String &name = String(), int potIndex = -1);
+void loadSettings();
+void getSettingsSnapshot(Settings& out);
+bool applySettingsSnapshot(const Settings& next);
+void setSavedUtc(uint64_t utcSec, bool saveImmediately);
+void setLastWateringUtc(uint64_t utcSec);
 
-// Ensure per-pot WorkerConfig entries exist for a given MAC and reported pot count
+int getWorkerConfigCount();
+bool getWorkerConfigAt(int index, WorkerConfig& out);
+bool findWorkerConfigByMac(const uint8_t mac[6], WorkerConfig& out);
+bool isWorkerConfigured(const uint8_t mac[6]);
+
+bool addWorkerByHex(const char* macHex, uint16_t threshold, uint16_t duration,
+                    const char* name = nullptr);
+bool removeWorkerByHex(const char* macHex);
+bool updateWorkerByHex(const char* macHex, uint16_t threshold, uint16_t duration,
+                       const char* name = nullptr, int potIndex = -1);
 void ensureWorkerConfigsForMac(const uint8_t mac[6], uint8_t potCount);
-// Clear all persisted settings and reset in-memory defaults
+
+void getRuntimeSnapshot(RuntimeSnapshot& out);
+bool getAutoEnabled();
+void setAutoEnabled(bool enabled);
+void setRuntimeState(State state);
+void setDataSyncRuntime(int64_t lastSyncUs, int64_t nextSyncUs);
+
+bool connectToWiFi();
+void saveWifiCred(const char* ssid, const char* password);
+bool clearWifiCredentials();
 bool clearAllSettings();
 
-extern Settings settings;
-extern volatile bool autoEnabled;
-extern volatile unsigned long lastWateringEnd;
-extern volatile unsigned long lastDataSync;
-
-void saveSettings();
-void loadSettings();
-bool connectToWiFi();
-void saveWifiCred(const char *ssid, const char *password);
-bool clearWifiCredentials();
-// Debounced save helpers
 void markSettingsDirty();
 void maybeSaveSettings();
+void saveSettingsNow();

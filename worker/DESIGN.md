@@ -11,15 +11,27 @@ Goal: As a worker device, it will have a capacitive soil moisture sensor and a s
 ### Details
 
 - Hardware
-  - ESP32 C3 Super Mini
-  - Valve activation pin: GPIO 1
-  - Battery pin: GPIO 4
-  - Soil moisture sensor reading pin: GPIO 3
+  - Worker firmware supports multiple hardware targets selected at build time
+  - `HW_V1_1POT_REV_A`
+    - Pot count: 1
+    - Valve activation pin: GPIO 1
+    - Battery pin: GPIO 4
+    - Soil moisture sensor reading pin: GPIO 3
+  - `HW_V2_8POT_REV_A`
+    - Pot count: 8
+    - Multiplexed soil sensing, shift-register valve control, and separate battery enable/ADC pins
+  - `HW_V2_8POT_REV_B`
+    - Pot count: 8
+    - Same general architecture as rev A with alternate pin assignments
+  - `HW_TARGET_16POT_REV_A`
+    - Pot count: 16
+    - Multiplexed soil sensing with shift-register valve control
 
 - Logics
   - Data sync interval
     - Cooldown timer until next data change between main and worker nodes
-    - Worker nodes go to deep sleep during this interval, only wake up after timer
+    - In auto mode, the worker enters deep sleep only after main sends a sleep command with the next delay
+    - In manual mode, the worker does not sleep for this interval and instead stays awake if paired
     - Minimum: 60 seconds
     - Maximum: 2,419,200 seconds (28 days)
     - Default: 3600 seconds (1 hour)
@@ -34,17 +46,20 @@ Goal: As a worker device, it will have a capacitive soil moisture sensor and a s
       - Battery level
   - Bluetooth
     - Broadcast with ACKs
-    - 31 bytes max payload for classic advertising
+    - Extended advertising is required
   - Workflow
     - Worker node
-      - Always on by deafult, broadcasting data periodically with target node Bluetooth MAC FF:FF:FF:FF:FF:FF. 
-      - After syncing with main node, receive sleep time and go to sleep, only wake up after and wait for main node probe to broadcast data
+      - When not paired with a main node, advertise status periodically with target node Bluetooth MAC FF:FF:FF:FF:FF:FF
+      - When paired and the main node is running manual mode, stay awake waiting for commands from that main node
+      - When paired and the main node sends a sleep command, go to deep sleep, wake after the requested timer, and wait for the next probe
       - Monitor soil moisture sensor
     - Worker node connection procedure
       - Not exactly connection, but as long as main node is able to communicate with worker, mark it as connected
       - Worker node starts broadcasting data periodically after power up
-      - If Bluetooth MAC address of worker node is added to list in main node, main node should proceed to standard device timing coordination
+      - Main node only proceeds after that worker MAC address is explicitly added to the configured list
+      - The first accepted command teaches the worker which main-node MAC address to trust afterward
     - Device timing coordination procedure
+      - This procedure only applies while the main node is in auto mode
       - Main node calculates next data sync time
       - With calculated delay time for each worker node, all worker should wake up around similar time
       - After watering procedure done, main node should calculate new time and send to workers, then workers go to sleep
@@ -52,84 +67,72 @@ Goal: As a worker device, it will have a capacitive soil moisture sensor and a s
         2. Worker broadcasts ACK
         3. Worker go to sleep
     - Data sync procedure
-      - After data sync interval plus extra small delay, assuming all worker nodes wake up, for each worker in the worker list:
+      - In auto mode, after data sync interval plus extra small delay, assuming all worker nodes wake up, for each worker in the worker list:
         1. Main node broadcasts probe to the worker
         2. Worker listens and broadcasts data
         3. Main node broadcasts ACK
+      - In manual mode, the worker still responds to periodic probes from main, but does not expect a follow-up sleep command
     - Watering procedure
       - After data sync, if all conditions meet the watering requirement
-        1. Main node activates water pump
-        2. For each node that soil moisture goes below the threshold:
-          2.1 Main node broadcasts watering duration to worker
-          2.2 Worker broadcasts ACK and activates valve
-          2.3 Worker stops valve after duration and broadcasts back same watering command
-          2.4 Main node broadcasts ACK
-        3. Main node stops pump and proceeds to device timing coordination procedure
+        1. Main starts the water-command advertisement and then starts the pump
+        2. Worker completes its ACK advertisement before operating any valve
+        3. Worker waters selected pots sequentially and sends `TYPE_EVENT_WATER_DONE`
+        4. Main ACKs completion and stops the pump
       - If conditions not meet, skip to device timing coordination procedure
     - Worker node retry and disconnect procudure
       - Either main node or worker node is not responding to message after certain time lenght, retry 3 times
       - If worker node does not respond after retries, main node marks it as disconnected and continue
       - If main node does not respond to worker node, reset the worker node itself and start over from worker node connection procedure
 
-## Bluetooth payload format (compact + AEAD)
+## Bluetooth Protocol
 
-The worker uses the compact packet layout described below for both status advertisements
-and command handling. When extended advertising is available a full STATUS (multiple soils)
-can be sent in one advert; otherwise the compact format minimizes the need for chunking.
+Main and worker firmware are a matched protocol pair. Extended advertising and AES-GCM
+are mandatory; packets that cannot be authenticated are discarded.
 
-Envelope
-- 2 bytes: Company Identifier (little-endian). For local testing use `0xFFFF`.
-- Followed by payload starting at TargetMAC.
+The manufacturer-data envelope is:
 
-Compact packet layout
-- CompanyID (2 bytes)
-- TargetMAC (6 bytes)
-- Nonce (2 bytes, big-endian)
-- MsgPayload: [MsgType(1), ...]
+- Company identifier: 2 bytes (`0xFFFF`).
+- Target MAC: 6 bytes.
+- Random boot session ID: 8 bytes, big-endian.
+- Per-session sequence: 4 bytes, big-endian.
+- AES-GCM encrypted body and 16-byte authentication tag.
 
-MsgType examples
-- `0x40` TYPE_STATUS: [TYPE_STATUS][Battery(1)][PotCount(1)][Soil1(2), ...]
-- `0x32` TYPE_CMD_WATER: [TYPE_CMD_WATER][PotMask(2)][DurationArray(2*N)]
-  - PotMask: 16-bit bitmask where bit `i` corresponds to pot `i`.
-  - DurationArray: N 16-bit big-endian seconds, where N is the count of set bits in PotMask.
-    Durations are listed in increasing pot-index order for the set bits.
-    Example: if PotMask has bits for pots 0, 2, 3, then DurationArray = [dur_0, dur_2, dur_3].
-- `0x30` TYPE_CMD_PROBE: probe request (no payload)
-- `0x20` TYPE_ACK: acknowledgement
+The body begins with a message type followed by TLVs encoded as
+`[field type][length][value]`. ACKs repeat the message ID in the envelope and are matched
+with the advertiser MAC.
 
-Encryption (AEAD)
-- If `USE_BT_CRYPTO` is enabled the worker encrypts the MsgPayload using AES-GCM
-  and appends the 16-byte tag. The receiver (main) will attempt to decrypt; on failure
-  the receiver falls back to raw payload parsing to preserve interoperability.
-- IV derivation: IV = first 12 bytes of HMAC-SHA256(network_key, target_mac || nonce || "btiv").
+The IV is the first 12 bytes of:
 
-Extended advertising
-- When `USE_EXT_ADV` is active and supported, use extended adverts to send larger STATUS
-  payloads. Otherwise the worker uses legacy adverts with the compact header.
+`HMAC-SHA256(network_key, target_mac || session_id || sequence || "btiv")`
 
-Legacy TLV compatibility
-- TLV helpers are still available but the worker now prefers the compact format.
-  The sender-side conversion from TLV to compact is only performed when the queued
-  buffer clearly matches TLV semantics (length byte exactly matches remaining bytes).
+The target MAC, session ID, and sequence are also authenticated as GCM associated data.
 
-Implementation notes
-- `btWorkerAdvertiseStatus()` constructs the compact STATUS payload and queues it via
-  `btCommonQueueCommand()` (which builds the CompanyID+header). `parse_compact_packet_header()`
-  is used to parse and decrypt received compact packets.
+Worker behavior:
 
-Hardware build variants
------------------------
+- An unpaired status targets the broadcast MAC. Its ACK completes transmission without
+  teaching the worker a main MAC.
+- Only a valid probe, water, or sleep command can establish the retained main MAC.
+- Scan callbacks authenticate and queue commands without operating hardware.
+- The worker-control task completes the command ACK advertisement before acting.
+- Water commands operate valves sequentially and finish with `TYPE_EVENT_WATER_DONE`.
+- Sleep begins only after the sleep-command ACK advertisement is complete.
+- One periodic task samples battery first and soil second every five seconds, publishing
+  both through one protected sensor snapshot.
+
+`TYPE_CONFIG` remains reserved and unused. Bluetooth common and crypto files intentionally
+remain duplicated between the two independently managed firmware directories.
+
+## Hardware Build Variants
+
 This worker firmware supports multiple hardware variants selected at compile time via a
-single `HW_TARGET_*` build flag. The flag determines pin mappings and the number of pots.
+single `HW_*` build flag. The flag determines pin mappings and the number of pots.
 
 Examples:
 - `HW_V1_1POT_REV_A` : original single-pot hardware (SOIL_PIN=3, VALVE_PIN=1)
 - `HW_V2_8POT_REV_A` : 8-pot with multiplexer (3 select pins) + one shift-register chip
 - `HW_V2_8POT_REV_B` : 8-pot variant with alternate pin assignments
 
-Set the build flag in `platformio.ini` or your build command (see platformio envs in repository).
-For multi-pot variants, `USE_EXT_ADV` should be enabled to avoid BLE legacy advertisement
-truncation (the build configuration provides example envs).
+The 16-pot target remains an intentional placeholder with incomplete pin mapping.
 
 
 

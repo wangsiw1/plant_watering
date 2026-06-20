@@ -1,13 +1,18 @@
 #include "Sensor.h"
 #include "Utility.h"
 #include <Arduino.h>
+#include "Battery.h"
 #include "HardwareConfig.h"
+#include "freertos/semphr.h"
 
 static const uint8_t SOIL_SAMPLE_COUNT = 10;
 static const uint8_t SOIL_TRIM_COUNT = 1;
 volatile uint16_t gSoilMoisture[WORKER_POT_COUNT];
+static SemaphoreHandle_t gSnapshotMutex = nullptr;
+static WorkerSensorSnapshot gSnapshot = {};
 
 void sensorBegin() {
+  if (!gSnapshotMutex) gSnapshotMutex = xSemaphoreCreateMutex();
 #if WORKER_POT_COUNT == 1
   // Read before for possible bug: https://community.simplefoc.com/t/pin-is-not-configured-as-analog-channel/6751/5
   analogRead(SOIL_PIN);
@@ -23,7 +28,28 @@ void sensorBegin() {
   pinMode(MUX_SEL_PIN1, OUTPUT);
   pinMode(MUX_SEL_PIN2, OUTPUT);
 #endif
+}
+
+void readWorkerSensors() {
+  readBattLevel();
   readSoilMoisture();
+  if (!gSnapshotMutex) return;
+  WorkerSensorSnapshot next{};
+  next.batteryMv = getBattMv();
+  for (size_t i = 0; i < WORKER_POT_COUNT; ++i) {
+    next.soils[i] = getSoilMoisture(i);
+  }
+  xSemaphoreTake(gSnapshotMutex, portMAX_DELAY);
+  gSnapshot = next;
+  xSemaphoreGive(gSnapshotMutex);
+}
+
+bool getWorkerSensorSnapshot(WorkerSensorSnapshot &snapshot) {
+  if (!gSnapshotMutex) return false;
+  xSemaphoreTake(gSnapshotMutex, portMAX_DELAY);
+  snapshot = gSnapshot;
+  xSemaphoreGive(gSnapshotMutex);
+  return true;
 }
 
 void readSoilMoisture() {
@@ -48,7 +74,8 @@ void readSoilMoisture() {
     }
     digitalWrite(SOIL_EN_PIN, LOW);
 #endif
-    gSoilMoisture[ch] = trimmedMean(samples, SOIL_SAMPLE_COUNT, SOIL_TRIM_COUNT);
+    uint16_t sensorMv = trimmedMean(samples, SOIL_SAMPLE_COUNT, SOIL_TRIM_COUNT);
+    gSoilMoisture[ch] = sensorMv;
   }
 }
 

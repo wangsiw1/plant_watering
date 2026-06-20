@@ -9,42 +9,36 @@
 static const uint32_t STATUS_INTERVAL = 10;
 static const uint32_t SENSOR_INTERVAL = 5;
 
-void TaskSensor(void *pvParameters) {
+void TaskSensors(void *pvParameters) {
 	(void) pvParameters;
 	for (;;) {
-		readSoilMoisture();
-		vTaskDelay(pdMS_TO_TICKS(SENSOR_INTERVAL * 1000));
-	}
-}
-
-void TaskBatt(void *pvParameters) {
-	(void) pvParameters;
-	for (;;) {
-		readBattLevel();
+		readWorkerSensors();
 		vTaskDelay(pdMS_TO_TICKS(SENSOR_INTERVAL * 1000));
 	}
 }
 
 void setup() {
 	Serial.begin(115200);
+	// analogSetAttenuation(ADC_11db);
 	vTaskDelay(pdMS_TO_TICKS(3000));
-	LOG("Bluetooth MAC address: %s", getBtMac().c_str());
+	char btmac[13]; getBtMacHex(btmac);
+	LOG("Bluetooth MAC address: %s", btmac);
 	
   	esp_log_level_set("gpio", ESP_LOG_WARN);
   	esp_log_level_set("NimBLE", ESP_LOG_WARN);
 	
-    valveBegin();
-    sensorBegin();
     battBegin();
+    sensorBegin();
+    valveBegin();
+    readWorkerSensors();
 
 	btWorkerBegin();
     
-	xTaskCreate(TaskSensor, "sensorTask", 2048, NULL, 2, NULL);
-	xTaskCreate(TaskBatt, "battTask", 2048, NULL, 2, NULL);
+	xTaskCreate(TaskSensors, "sensorTask", 3072, NULL, 2, NULL);
 }
 
 void loop() {
-    vTaskDelay(STATUS_INTERVAL * 1000);
+    vTaskDelay(pdMS_TO_TICKS(STATUS_INTERVAL * 1000));
 	// No communication from main over certain time, assuming lost connection, reset main mac and start broadcast again
 	if (btLastCommOverdue()) mainMacReset();
 	if (!mainMacIsSet()) {

@@ -1,37 +1,39 @@
 #include "Utility.h"
 #include <esp_mac.h>
+#include <cstring>
+#include <cctype>
+#include <cstdio>
 
-static String getMacAddr(esp_mac_type_t device) {
-	uint8_t mac[6];
-	esp_read_mac(mac, device);
-	char buf[13];
-	sprintf(buf, "%02X%02X%02X%02X%02X%02X", mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
-	String s(buf);
-	s.toLowerCase();
-	return s;
+static inline int hexchar_to_nibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
 }
 
-bool macFromHexString(const String &macHex, uint8_t out[6]) {
-  String s = macHex;
-  s.replace(":", "");
-  s.replace("-", "");
-  s.trim();
-  if (s.length() != 12) return false;
-  for (int i=0;i<6;i++) {
-    String part = s.substring(i*2, i*2+2);
-    char buf[3]; part.toCharArray(buf,3);
-    char* endptr;
-    long v = strtol(buf, &endptr, 16);
-    if (*endptr != '\0') return false;
-    out[i] = (uint8_t)v;
+bool macFromHexString(const char *macHex, uint8_t out[6]) {
+  if (!macHex) return false;
+  size_t len = strlen(macHex);
+  if (len != 12) return false;
+  for (int i = 0; i < 6; ++i) {
+    int hi = hexchar_to_nibble(macHex[i*2]);
+    int lo = hexchar_to_nibble(macHex[i*2 + 1]);
+    if (hi < 0 || lo < 0) return false;
+    out[i] = (uint8_t)((hi << 4) | lo);
   }
   return true;
 }
 
-const String& getBtMac()
-{
-    static String value = getMacAddr(ESP_MAC_BT);
-    return value;
+void macToHexLower(const uint8_t mac[6], char out[13]) {
+  if (!out) return;
+  snprintf(out, 13, "%02x%02x%02x%02x%02x%02x",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+void getBtMacHex(char out[13]) {
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_BT);
+  macToHexLower(mac, out);
 }
 
 // Trimmed mean: sort values and remove min/max before averaging

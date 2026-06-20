@@ -1,335 +1,549 @@
-#include "Config.h"
-#include "Utility.h"
+#include "config.h"
 #include "BluetoothMain.h"
-#include <WiFi.h>
+
 #include <Preferences.h>
+#include <WiFi.h>
+#include <cstring>
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
-static Preferences prefs;
+namespace {
+constexpr uint32_t WATER_INTERVAL_MIN = 60;
+constexpr uint32_t WATER_INTERVAL_MAX = 2419200;
+constexpr uint32_t DATA_SYNC_INTERVAL_MIN = 60;
+constexpr uint32_t DATA_SYNC_INTERVAL_MAX = 2419200;
+constexpr uint16_t DEFAULT_THRESHOLD = 2000;
+constexpr uint16_t DEFAULT_DURATION = 5;
+constexpr int64_t SAVE_DEBOUNCE_US = 5000000LL;
 
-Settings settings;
-volatile bool autoEnabled = false;
-volatile unsigned long lastWateringEnd = 0;
-volatile unsigned long lastDataSync = 0;
+Settings gSettings{};
+WorkerConfig gWorkers[MAX_WORKER_COUNT] = {};
+Settings gPersistenceSettings{};
+WorkerConfig gPersistenceWorkers[MAX_WORKER_COUNT] = {};
+int gWorkerCount = 0;
+RuntimeSnapshot gRuntime{READY, false, 0, 0};
+SemaphoreHandle_t gConfigMutex = nullptr;
+SemaphoreHandle_t gPersistenceMutex = nullptr;
+uint32_t gDirtyGeneration = 0;
+uint32_t gSavedGeneration = 0;
+int64_t gDirtyAtUs = 0;
 
-WorkerConfig workerList[MAX_WORKER_COUNT];
-int workerListCount = 0;
-bool workerListDirty = false;
-State state = READY;
+void ensureMutexes() {
+  if (!gConfigMutex) gConfigMutex = xSemaphoreCreateMutex();
+  if (!gPersistenceMutex) gPersistenceMutex = xSemaphoreCreateMutex();
+}
 
-// Debounce state for settings persistence
-static volatile bool settingsDirty = false;
-static unsigned long settingsDirtyAt = 0;
-const unsigned long SAVE_DEBOUNCE_MS = 5000;
+void lockConfig() {
+  ensureMutexes();
+  xSemaphoreTake(gConfigMutex, portMAX_DELAY);
+}
 
-static const uint32_t WATER_INTERVAL_MIN = 60;
-static const uint32_t WATER_INTERVAL_MAX = 2419200;
-static const uint32_t DATA_SYNC_INTERVAL_MIN = 60;
-static const uint32_t DATA_SYNC_INTERVAL_MAX = 2419200;
+void unlockConfig() {
+  xSemaphoreGive(gConfigMutex);
+}
 
-void saveSettings() {
-  // Only write changed values to reduce wear on NVS flash.
-  prefs.begin("plant", false);
-  String prevName = prefs.getString("name", "");
-  if (!prevName.equals(settings.name)) prefs.putString("name", settings.name);
-  uint32_t prev = prefs.getUInt("wint", 0);
-  if (prev != settings.waterInterval) prefs.putUInt("wint", settings.waterInterval);
-  prev = prefs.getUInt("dsint", 0);
-  if (prev != settings.dataSyncInterval) prefs.putUInt("dsint", settings.dataSyncInterval);
-  prev = prefs.getUInt("start", 0);
-  if (prev != settings.activeStart) prefs.putUInt("start", settings.activeStart);
-  prev = prefs.getUInt("end", 0);
-  if (prev != settings.activeEnd) prefs.putUInt("end", settings.activeEnd);
-  prev = prefs.getUInt("tsec", 0);
-  if (prev != settings.savedTimeOfDaySec) prefs.putUInt("tsec", settings.savedTimeOfDaySec);
-  // persisted savedMillis (64-bit)
-  uint64_t prevMillis = 0;
-  size_t got = prefs.getBytes("tmill64", &prevMillis, sizeof(prevMillis));
-  if (got != sizeof(prevMillis)) prevMillis = 0;
-  if (prevMillis != settings.savedMillis) prefs.putBytes("tmill64", &settings.savedMillis, sizeof(settings.savedMillis));
-  // epoch and timezone (64-bit epoch)
-  uint64_t prevEpoch = 0;
-  got = prefs.getBytes("epoch64", &prevEpoch, sizeof(prevEpoch));
-  if (got != sizeof(prevEpoch)) prevEpoch = 0;
-  if (prevEpoch != settings.savedEpochSec) prefs.putBytes("epoch64", &settings.savedEpochSec, sizeof(settings.savedEpochSec));
-  uint64_t prevEpochMillis = 0;
-  got = prefs.getBytes("epochmill64", &prevEpochMillis, sizeof(prevEpochMillis));
-  if (got != sizeof(prevEpochMillis)) prevEpochMillis = 0;
-  if (prevEpochMillis != settings.savedEpochMillis) prefs.putBytes("epochmill64", &settings.savedEpochMillis, sizeof(settings.savedEpochMillis));
-  int prevTz = prefs.getInt("tz", 0);
-  if (prevTz != settings.tzOffsetMinutes) prefs.putInt("tz", settings.tzOffsetMinutes);
+void markDirtyLocked() {
+  ++gDirtyGeneration;
+  if (gDirtyGeneration == 0) ++gDirtyGeneration;
+  gDirtyAtUs = esp_timer_get_time();
+}
 
-  // Write worker list only when it has been modified to avoid unnecessary writes
-  if (workerListDirty) {
-    prefs.putUInt("wcount", workerListCount);
-    for (int i=0;i<workerListCount;i++) {
-      char key[16];
-      sprintf(key, "wmac%d", i);
-      prefs.putBytes(key, workerList[i].mac, 6);
-      sprintf(key, "wth%d", i);
-      prefs.putUInt(key, workerList[i].threshold);
-      sprintf(key, "wdur%d", i);
-      prefs.putUInt(key, workerList[i].duration);
-      sprintf(key, "wpi%d", i);
-      prefs.putUChar(key, workerList[i].potIndex);
-      sprintf(key, "wnm%d", i);
-      prefs.putString(key, String(workerList[i].name));
-    }
-    workerListDirty = false;
+void initializeWorker(WorkerConfig& worker, const uint8_t mac[6],
+                      const char* name, uint8_t potCount) {
+  memset(&worker, 0, sizeof(worker));
+  memcpy(worker.mac, mac, 6);
+  worker.potCount = static_cast<uint8_t>(constrain(potCount, 1, MAX_POTS_PER_DEVICE));
+  copyUtf8Truncated(name, worker.workerName, sizeof(worker.workerName));
+  for (int pot = 0; pot < worker.potCount; ++pot) {
+    worker.thresholds[pot] = DEFAULT_THRESHOLD;
+    worker.durations[pot] = DEFAULT_DURATION;
   }
+}
+
+int findWorkerLocked(const uint8_t mac[6]) {
+  for (int i = 0; i < gWorkerCount; ++i) {
+    if (memcmp(gWorkers[i].mac, mac, 6) == 0) return i;
+  }
+  return -1;
+}
+
+bool validSettings(const Settings& value) {
+  return value.waterInterval >= WATER_INTERVAL_MIN &&
+         value.waterInterval <= WATER_INTERVAL_MAX &&
+         value.dataSyncInterval >= DATA_SYNC_INTERVAL_MIN &&
+         value.dataSyncInterval <= DATA_SYNC_INTERVAL_MAX &&
+         value.activeStart < 86400 && value.activeEnd < 86400 &&
+         value.tzOffsetMinutes >= -14 * 60 &&
+         value.tzOffsetMinutes <= 14 * 60;
+}
+
+bool writeSnapshot(const Settings& settings,
+                   const WorkerConfig workers[MAX_WORKER_COUNT],
+                   int workerCount) {
+  Preferences prefs;
+  if (!prefs.begin("plant", false)) return false;
+  if (prefs.getString("name", "") != settings.name)
+    prefs.putString("name", settings.name);
+  if (prefs.getUInt("wint", 0) != settings.waterInterval)
+    prefs.putUInt("wint", settings.waterInterval);
+  if (prefs.getUInt("dsint", 0) != settings.dataSyncInterval)
+    prefs.putUInt("dsint", settings.dataSyncInterval);
+  if (prefs.getUInt("start", UINT32_MAX) != settings.activeStart)
+    prefs.putUInt("start", settings.activeStart);
+  if (prefs.getUInt("end", UINT32_MAX) != settings.activeEnd)
+    prefs.putUInt("end", settings.activeEnd);
+  if (prefs.getInt("tz", INT32_MAX) != settings.tzOffsetMinutes)
+    prefs.putInt("tz", settings.tzOffsetMinutes);
+
+  uint64_t previous64 = 0;
+  if (prefs.getBytes("utc64", &previous64, sizeof(previous64)) != sizeof(previous64) ||
+      previous64 != settings.savedUtcSec) {
+    prefs.putBytes("utc64", &settings.savedUtcSec, sizeof(settings.savedUtcSec));
+  }
+  previous64 = 0;
+  if (prefs.getBytes("lastw64", &previous64, sizeof(previous64)) != sizeof(previous64) ||
+      previous64 != settings.lastWateringUtcSec) {
+    prefs.putBytes("lastw64", &settings.lastWateringUtcSec,
+                   sizeof(settings.lastWateringUtcSec));
+  }
+  if (prefs.getUInt("wcount", UINT32_MAX) != static_cast<uint32_t>(workerCount))
+    prefs.putUInt("wcount", workerCount);
+
+  for (int i = 0; i < workerCount; ++i) {
+    char key[24];
+    uint8_t previousMac[6] = {};
+    snprintf(key, sizeof(key), "wmac%d", i);
+    if (prefs.getBytes(key, previousMac, sizeof(previousMac)) != sizeof(previousMac) ||
+        memcmp(previousMac, workers[i].mac, sizeof(previousMac)) != 0) {
+      prefs.putBytes(key, workers[i].mac, 6);
+    }
+    snprintf(key, sizeof(key), "wname%d", i);
+    if (prefs.getString(key, "") != workers[i].workerName)
+      prefs.putString(key, workers[i].workerName);
+    snprintf(key, sizeof(key), "wpc%d", i);
+    if (prefs.getUChar(key, 0) != workers[i].potCount)
+      prefs.putUChar(key, workers[i].potCount);
+    uint16_t previousValues[MAX_POTS_PER_DEVICE] = {};
+    snprintf(key, sizeof(key), "wtharr%d", i);
+    if (prefs.getBytes(key, previousValues, sizeof(previousValues)) !=
+            sizeof(previousValues) ||
+        memcmp(previousValues, workers[i].thresholds, sizeof(previousValues)) != 0) {
+      prefs.putBytes(key, workers[i].thresholds, sizeof(workers[i].thresholds));
+    }
+    memset(previousValues, 0, sizeof(previousValues));
+    snprintf(key, sizeof(key), "wdurarr%d", i);
+    if (prefs.getBytes(key, previousValues, sizeof(previousValues)) !=
+            sizeof(previousValues) ||
+        memcmp(previousValues, workers[i].durations, sizeof(previousValues)) != 0) {
+      prefs.putBytes(key, workers[i].durations, sizeof(workers[i].durations));
+    }
+    for (int pot = 0; pot < workers[i].potCount; ++pot) {
+      snprintf(key, sizeof(key), "wpnm%d_%d", i, pot);
+      if (prefs.getString(key, "") != workers[i].potName[pot])
+        prefs.putString(key, workers[i].potName[pot]);
+    }
+  }
+  prefs.end();
+  return true;
+}
 }
 
 void loadSettings() {
-  prefs.begin("plant", false);
-  settings.name = prefs.getString("name", getWifiMacLast6());
-  settings.waterInterval = prefs.getUInt("wint", 3600);
-  settings.dataSyncInterval = prefs.getUInt("dsint", 3600);
-  settings.activeStart = prefs.getUInt("start", 0);
-  settings.activeEnd = prefs.getUInt("end", 24*3600-1);
-  settings.savedTimeOfDaySec = prefs.getUInt("tsec", 0);
-  // load 64-bit persisted values (fall back to 0 on missing)
-  size_t got = prefs.getBytes("tmill64", &settings.savedMillis, sizeof(settings.savedMillis));
-  if (got != sizeof(settings.savedMillis)) settings.savedMillis = 0;
-  got = prefs.getBytes("epoch64", &settings.savedEpochSec, sizeof(settings.savedEpochSec));
-  if (got != sizeof(settings.savedEpochSec)) settings.savedEpochSec = 0;
-  got = prefs.getBytes("epochmill64", &settings.savedEpochMillis, sizeof(settings.savedEpochMillis));
-  if (got != sizeof(settings.savedEpochMillis)) settings.savedEpochMillis = 0;
-  settings.tzOffsetMinutes = (int16_t)prefs.getInt("tz", 0);
-  // If the persisted millis appears to be from a previous boot (larger than
-  // the current millis()), it will cause huge deltas when computing current
-  // time. Adjust to current millis() to keep time calculations sane after a
-  // reboot. Persist the corrected value back to NVS.
-  uint64_t nowMillis = (uint64_t)millis();
-  if (settings.savedMillis > nowMillis) {
-    settings.savedMillis = nowMillis;
-    prefs.putBytes("tmill64", &settings.savedMillis, sizeof(settings.savedMillis));
+  ensureMutexes();
+  Settings loaded{};
+  char defaultName[7];
+  getWifiMacLast6Hex(defaultName);
+  copyUtf8Truncated(defaultName, loaded.name, sizeof(loaded.name));
+  loaded.waterInterval = 3600;
+  loaded.dataSyncInterval = 3600;
+  loaded.activeStart = 0;
+  loaded.activeEnd = 86399;
+
+  memset(gPersistenceWorkers, 0, sizeof(gPersistenceWorkers));
+  int workerCount = 0;
+  Preferences prefs;
+  if (prefs.begin("plant", true)) {
+    String name = prefs.getString("name", defaultName);
+    copyUtf8Truncated(name.c_str(), loaded.name, sizeof(loaded.name));
+    loaded.waterInterval =
+        constrain(prefs.getUInt("wint", 3600), WATER_INTERVAL_MIN, WATER_INTERVAL_MAX);
+    loaded.dataSyncInterval =
+        constrain(prefs.getUInt("dsint", 3600), DATA_SYNC_INTERVAL_MIN, DATA_SYNC_INTERVAL_MAX);
+    loaded.activeStart =
+        min(prefs.getUInt("start", 0), static_cast<uint32_t>(86399));
+    loaded.activeEnd =
+        min(prefs.getUInt("end", 86399), static_cast<uint32_t>(86399));
+    loaded.tzOffsetMinutes =
+        static_cast<int16_t>(constrain(prefs.getInt("tz", 0), -14 * 60, 14 * 60));
+    if (prefs.getBytes("utc64", &loaded.savedUtcSec, sizeof(loaded.savedUtcSec)) !=
+        sizeof(loaded.savedUtcSec)) {
+      uint64_t legacyLocalEpoch = 0;
+      if (prefs.getBytes("epoch64", &legacyLocalEpoch, sizeof(legacyLocalEpoch)) ==
+          sizeof(legacyLocalEpoch)) {
+        int64_t migrated =
+            static_cast<int64_t>(legacyLocalEpoch) -
+            static_cast<int64_t>(loaded.tzOffsetMinutes) * 60;
+        loaded.savedUtcSec = migrated > 0 ? static_cast<uint64_t>(migrated) : 0;
+      }
+    }
+    prefs.getBytes("lastw64", &loaded.lastWateringUtcSec,
+                   sizeof(loaded.lastWateringUtcSec));
+
+    int storedCount = min(static_cast<int>(prefs.getUInt("wcount", 0)),
+                          MAX_WORKER_COUNT);
+    for (int i = 0; i < storedCount; ++i) {
+      WorkerConfig worker{};
+      char key[24];
+      snprintf(key, sizeof(key), "wmac%d", i);
+      if (prefs.getBytes(key, worker.mac, 6) != 6) continue;
+      bool duplicate = false;
+      for (int existing = 0; existing < workerCount; ++existing) {
+        if (memcmp(gPersistenceWorkers[existing].mac, worker.mac, 6) == 0)
+          duplicate = true;
+      }
+      if (duplicate) continue;
+      snprintf(key, sizeof(key), "wname%d", i);
+      String workerName = prefs.getString(key, "");
+      copyUtf8Truncated(workerName.c_str(), worker.workerName,
+                        sizeof(worker.workerName));
+      snprintf(key, sizeof(key), "wpc%d", i);
+      worker.potCount =
+          static_cast<uint8_t>(constrain(prefs.getUChar(key, 1), 1, MAX_POTS_PER_DEVICE));
+      for (int pot = 0; pot < MAX_POTS_PER_DEVICE; ++pot) {
+        worker.thresholds[pot] = DEFAULT_THRESHOLD;
+        worker.durations[pot] = DEFAULT_DURATION;
+      }
+      snprintf(key, sizeof(key), "wtharr%d", i);
+      prefs.getBytes(key, worker.thresholds, sizeof(worker.thresholds));
+      snprintf(key, sizeof(key), "wdurarr%d", i);
+      prefs.getBytes(key, worker.durations, sizeof(worker.durations));
+      for (int pot = 0; pot < worker.potCount; ++pot) {
+        worker.thresholds[pot] = min(worker.thresholds[pot], static_cast<uint16_t>(4095));
+        worker.durations[pot] =
+            static_cast<uint16_t>(constrain(worker.durations[pot], 1, 60));
+        snprintf(key, sizeof(key), "wpnm%d_%d", i, pot);
+        String potName = prefs.getString(key, "");
+        copyUtf8Truncated(potName.c_str(), worker.potName[pot],
+                          sizeof(worker.potName[pot]));
+      }
+      gPersistenceWorkers[workerCount++] = worker;
+    }
+    prefs.end();
   }
-  // same sanity check for persisted epoch millis
-  if (settings.savedEpochMillis > nowMillis) {
-    settings.savedEpochMillis = nowMillis;
-    prefs.putBytes("epochmill64", &settings.savedEpochMillis, sizeof(settings.savedEpochMillis));
-  }
-  if (settings.waterInterval < WATER_INTERVAL_MIN) settings.waterInterval = WATER_INTERVAL_MIN;
-  if (settings.waterInterval > WATER_INTERVAL_MAX) settings.waterInterval = WATER_INTERVAL_MAX;
-  if (settings.dataSyncInterval < DATA_SYNC_INTERVAL_MIN) settings.dataSyncInterval = DATA_SYNC_INTERVAL_MIN;
-  if (settings.dataSyncInterval > DATA_SYNC_INTERVAL_MAX) settings.dataSyncInterval = DATA_SYNC_INTERVAL_MAX;
-  // load worker list
-  workerListCount = prefs.getUInt("wcount", 0);
-  if (workerListCount > MAX_WORKER_COUNT) workerListCount = MAX_WORKER_COUNT;
-  for (int i=0;i<workerListCount;i++) {
-    char key[16];
-    sprintf(key, "wmac%d", i);
-    prefs.getBytes(key, workerList[i].mac, 6);
-    sprintf(key, "wth%d", i);
-    workerList[i].threshold = prefs.getUInt(key, 2000);
-    sprintf(key, "wdur%d", i);
-    workerList[i].duration = prefs.getUInt(key, 5);
-    sprintf(key, "wpi%d", i);
-    workerList[i].potIndex = prefs.getUChar(key, 0);
-    sprintf(key, "wnm%d", i);
-    String nm = prefs.getString(key, "");
-    if (nm.length()) {
-      strncpy(workerList[i].name, nm.c_str(), sizeof(workerList[i].name)-1);
-      workerList[i].name[sizeof(workerList[i].name)-1] = '\0';
-    } else workerList[i].name[0] = '\0';
-  }
+
+  lockConfig();
+  gSettings = loaded;
+  memcpy(gWorkers, gPersistenceWorkers, sizeof(gWorkers));
+  gWorkerCount = workerCount;
+  gDirtyGeneration = 1;
+  gSavedGeneration = 1;
+  unlockConfig();
 }
 
-// Function to connect to Wi-Fi using stored credentials
-bool connectToWiFi() {
-  prefs.begin("plant", true);
-  String savedSSID = prefs.getString("ssid", "");
-  String savedPassword = prefs.getString("password", "");
+void getSettingsSnapshot(Settings& out) {
+  lockConfig();
+  out = gSettings;
+  unlockConfig();
+}
 
-  if (savedSSID.isEmpty()) {
-    LOG("No saved Wi-Fi credentials found.");
+bool applySettingsSnapshot(const Settings& next) {
+  if (!validSettings(next)) return false;
+  lockConfig();
+  gSettings = next;
+  gSettings.name[UTF8_NAME_STORAGE_BYTES - 1] = '\0';
+  markDirtyLocked();
+  unlockConfig();
+  return true;
+}
+
+void setSavedUtc(uint64_t utcSec, bool saveImmediately) {
+  lockConfig();
+  gSettings.savedUtcSec = utcSec;
+  markDirtyLocked();
+  unlockConfig();
+  if (saveImmediately) saveSettingsNow();
+}
+
+void setLastWateringUtc(uint64_t utcSec) {
+  lockConfig();
+  gSettings.lastWateringUtcSec = utcSec;
+  markDirtyLocked();
+  unlockConfig();
+}
+
+int getWorkerConfigCount() {
+  lockConfig();
+  int count = gWorkerCount;
+  unlockConfig();
+  return count;
+}
+
+bool getWorkerConfigAt(int index, WorkerConfig& out) {
+  lockConfig();
+  bool valid = index >= 0 && index < gWorkerCount;
+  if (valid) out = gWorkers[index];
+  unlockConfig();
+  return valid;
+}
+
+bool findWorkerConfigByMac(const uint8_t mac[6], WorkerConfig& out) {
+  if (!mac) return false;
+  lockConfig();
+  int index = findWorkerLocked(mac);
+  if (index >= 0) out = gWorkers[index];
+  unlockConfig();
+  return index >= 0;
+}
+
+bool isWorkerConfigured(const uint8_t mac[6]) {
+  WorkerConfig ignored{};
+  return findWorkerConfigByMac(mac, ignored);
+}
+
+bool addWorkerByHex(const char* macHex, uint16_t threshold, uint16_t duration,
+                    const char* name) {
+  uint8_t mac[6];
+  if (!macFromHexString(macHex, mac) || threshold > 4095 ||
+      duration == 0 || duration > 60) {
     return false;
   }
-
-  LOG("Connecting to saved Wi-Fi: %s", savedSSID.c_str());
-  if (savedPassword.isEmpty()) {
-    WiFi.begin(savedSSID.c_str());
-  } else {
-    WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
-  }
-
-  unsigned long startTime = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    if (millis() - startTime > 10000) {
-      LOG("Failed to connect to saved Wi-Fi.");
+  lockConfig();
+  int index = findWorkerLocked(mac);
+  if (index < 0) {
+    if (gWorkerCount >= MAX_WORKER_COUNT) {
+      unlockConfig();
       return false;
     }
-    delay(500);
+    index = gWorkerCount++;
+    initializeWorker(gWorkers[index], mac, name, 1);
+    gWorkers[index].thresholds[0] = threshold;
+    gWorkers[index].durations[0] = duration;
+  } else if (name) {
+    copyUtf8Truncated(name, gWorkers[index].workerName,
+                      sizeof(gWorkers[index].workerName));
   }
-
-  LOG("Successfully connected to %s", savedSSID.c_str());
-  return true;
-}
-
-void saveWifiCred(const char *ssid, const char *password) {
-  LOG("Provisioning successful! SSID: %s", ssid);
-  prefs.begin("plant", false);
-  // Store the credentials and API key in preferences
-  prefs.putString("ssid", String(ssid));
-  if (password) {
-    prefs.putString("password", String(password));
-  }
-  
-  LOG("Credentials saved.");
-}
-
-bool addWorkerByHex(const String &macHex, uint16_t threshold, uint16_t duration, const String &name) {
-  if (workerListCount >= MAX_WORKER_COUNT) return false;
-  uint8_t mac[6];
-  if (!macFromHexString(macHex, mac)) return false;
-  // auto-assign potIndex: pick next available index for this MAC
-  uint8_t newPotIndex = 0;
-  for (int i=0;i<workerListCount;i++) if (memcmp(workerList[i].mac, mac, 6)==0) if (workerList[i].potIndex >= newPotIndex) newPotIndex = workerList[i].potIndex + 1;
-  if (newPotIndex >= MAX_POTS_PER_DEVICE) return false;
-  memcpy(workerList[workerListCount].mac, mac, 6);
-  workerList[workerListCount].threshold = threshold;
-  workerList[workerListCount].duration = duration;
-  workerList[workerListCount].potIndex = newPotIndex;
-  if (name.length()) {
-    strncpy(workerList[workerListCount].name, name.c_str(), sizeof(workerList[workerListCount].name)-1);
-    workerList[workerListCount].name[sizeof(workerList[workerListCount].name)-1] = '\0';
-  } else workerList[workerListCount].name[0] = '\0';
-  workerListCount++;
-  // ensure a placeholder exists in discovery cache so updates can be applied
+  markDirtyLocked();
+  unlockConfig();
   btMainEnsureNodeExists(mac);
-  workerListDirty = true;
-  saveSettings();
   return true;
 }
 
-bool removeWorkerByHex(const String &macHex) {
+bool removeWorkerByHex(const char* macHex) {
   uint8_t mac[6];
   if (!macFromHexString(macHex, mac)) return false;
-  int write = 0;
-  bool removed = false;
-  for (int i = 0; i < workerListCount; ++i) {
-    if (memcmp(workerList[i].mac, mac, 6) == 0) {
-      removed = true;
-      continue;
-    }
-    if (write != i) workerList[write] = workerList[i];
-    ++write;
+  lockConfig();
+  int index = findWorkerLocked(mac);
+  if (index < 0) {
+    unlockConfig();
+    return false;
   }
-  if (removed) {
-    workerListCount = write;
-    btMainRemoveNodeByMac(mac);
-    workerListDirty = true;
-    saveSettings();
-    return true;
-  }
-  return false;
+  for (int i = index; i < gWorkerCount - 1; ++i) gWorkers[i] = gWorkers[i + 1];
+  --gWorkerCount;
+  markDirtyLocked();
+  unlockConfig();
+  btMainRemoveNodeByMac(mac);
+  return true;
 }
 
-// Ensure per-pot WorkerConfig entries exist for a given worker MAC
+bool updateWorkerByHex(const char* macHex, uint16_t threshold, uint16_t duration,
+                       const char* name, int potIndex) {
+  uint8_t mac[6];
+  if (!macFromHexString(macHex, mac) || threshold > 4095 ||
+      duration == 0 || duration > 60) {
+    return false;
+  }
+  lockConfig();
+  int index = findWorkerLocked(mac);
+  if (index < 0 || potIndex >= MAX_POTS_PER_DEVICE) {
+    unlockConfig();
+    return false;
+  }
+  WorkerConfig& worker = gWorkers[index];
+  if (potIndex >= 0) {
+    for (int pot = worker.potCount; pot <= potIndex; ++pot) {
+      worker.thresholds[pot] = DEFAULT_THRESHOLD;
+      worker.durations[pot] = DEFAULT_DURATION;
+      worker.potName[pot][0] = '\0';
+    }
+    if (potIndex >= worker.potCount) worker.potCount = potIndex + 1;
+    worker.thresholds[potIndex] = threshold;
+    worker.durations[potIndex] = duration;
+    if (name) copyUtf8Truncated(name, worker.potName[potIndex],
+                                sizeof(worker.potName[potIndex]));
+  } else if (name) {
+    copyUtf8Truncated(name, worker.workerName, sizeof(worker.workerName));
+  }
+  markDirtyLocked();
+  unlockConfig();
+  return true;
+}
+
 void ensureWorkerConfigsForMac(const uint8_t mac[6], uint8_t potCount) {
-  if (potCount == 0) return;
-  if (potCount > MAX_POTS_PER_DEVICE) potCount = MAX_POTS_PER_DEVICE;
-  // Count existing entries and find a template entry if present
-  int existing = 0;
-  int firstIndex = -1;
-  for (int i = 0; i < workerListCount; ++i) {
-    if (memcmp(workerList[i].mac, mac, 6) == 0) {
-      ++existing;
-      if (firstIndex == -1) firstIndex = i;
-    }
+  if (!mac || potCount == 0) return;
+  potCount = min(potCount, static_cast<uint8_t>(MAX_POTS_PER_DEVICE));
+  lockConfig();
+  int index = findWorkerLocked(mac);
+  if (index < 0 || gWorkers[index].potCount >= potCount) {
+    unlockConfig();
+    return;
   }
-  if (existing >= potCount) return; // already have enough configs
-
-  uint16_t defThreshold = 2000;
-  uint16_t defDuration = 5;
-  char defName[32] = {0};
-  if (firstIndex != -1) {
-    defThreshold = workerList[firstIndex].threshold;
-    defDuration = workerList[firstIndex].duration;
-    strncpy(defName, workerList[firstIndex].name, sizeof(defName)-1);
-    defName[sizeof(defName)-1] = '\0';
+  WorkerConfig& worker = gWorkers[index];
+  for (int pot = worker.potCount; pot < potCount; ++pot) {
+    worker.thresholds[pot] = DEFAULT_THRESHOLD;
+    worker.durations[pot] = DEFAULT_DURATION;
+    worker.potName[pot][0] = '\0';
   }
-
-  for (int pi = 0; pi < potCount; ++pi) {
-    bool found = false;
-    for (int i = 0; i < workerListCount; ++i) {
-      if (memcmp(workerList[i].mac, mac, 6) == 0 && workerList[i].potIndex == (uint8_t)pi) { found = true; break; }
-    }
-    if (found) continue;
-    if (workerListCount >= MAX_WORKER_COUNT) break;
-    memcpy(workerList[workerListCount].mac, mac, 6);
-    workerList[workerListCount].threshold = defThreshold;
-    workerList[workerListCount].duration = defDuration;
-    workerList[workerListCount].potIndex = (uint8_t)pi;
-    strncpy(workerList[workerListCount].name, defName, sizeof(workerList[workerListCount].name)-1);
-    workerList[workerListCount].name[sizeof(workerList[workerListCount].name)-1] = '\0';
-    workerListCount++;
-  }
-  workerListDirty = true;
-  saveSettings();
+  worker.potCount = potCount;
+  markDirtyLocked();
+  unlockConfig();
 }
 
-// Clear all persisted settings and reset in-memory defaults
-bool clearAllSettings() {
-  prefs.begin("plant", false);
-  prefs.clear();
+void getRuntimeSnapshot(RuntimeSnapshot& out) {
+  lockConfig();
+  out = gRuntime;
+  unlockConfig();
+}
+
+bool getAutoEnabled() {
+  RuntimeSnapshot snapshot{};
+  getRuntimeSnapshot(snapshot);
+  return snapshot.autoEnabled;
+}
+
+void setAutoEnabled(bool enabled) {
+  lockConfig();
+  gRuntime.autoEnabled = enabled;
+  unlockConfig();
+}
+
+void setRuntimeState(State state) {
+  lockConfig();
+  gRuntime.state = state;
+  unlockConfig();
+}
+
+void setDataSyncRuntime(int64_t lastSyncUs, int64_t nextSyncUs) {
+  lockConfig();
+  gRuntime.lastDataSyncUs = lastSyncUs;
+  gRuntime.nextDataSyncUs = nextSyncUs;
+  unlockConfig();
+}
+
+bool connectToWiFi() {
+  ensureMutexes();
+  xSemaphoreTake(gPersistenceMutex, portMAX_DELAY);
+  Preferences prefs;
+  if (!prefs.begin("plant", true)) {
+    xSemaphoreGive(gPersistenceMutex);
+    return false;
+  }
+  String ssid = prefs.getString("ssid", "");
+  String password = prefs.getString("password", "");
   prefs.end();
-  // reset in-memory state to defaults
-  workerListCount = 0;
-  workerListDirty = true;
-  settings.name = getWifiMacLast6();
-  settings.waterInterval = 3600;
-  settings.dataSyncInterval = 3600;
-  settings.activeStart = 0;
-  settings.activeEnd = 24*3600-1;
-  settings.savedTimeOfDaySec = 0;
-  settings.savedMillis = (uint64_t)millis();
-  settings.savedEpochSec = 0;
-  settings.savedEpochMillis = (uint64_t)millis();
-  settings.tzOffsetMinutes = 0;
-  saveSettings();
-  return true;
-}
-
-// Update existing worker identified by MAC. Returns true if updated.
-bool updateWorkerByHex(const String &macHex, uint16_t threshold, uint16_t duration, const String &name, int potIndex) {
-  uint8_t mac[6];
-  if (!macFromHexString(macHex, mac)) return false;
-  for (int i=0;i<workerListCount;i++) {
-    if (memcmp(workerList[i].mac, mac, 6)==0 && (potIndex < 0 || workerList[i].potIndex == (uint8_t)potIndex)) {
-      workerList[i].threshold = threshold;
-      workerList[i].duration = duration;
-      if (name.length()) {
-        strncpy(workerList[i].name, name.c_str(), sizeof(workerList[i].name)-1);
-        workerList[i].name[sizeof(workerList[i].name)-1] = '\0';
-      } else workerList[i].name[0] = '\0';
-      workerListDirty = true;
-      saveSettings();
-      return true;
-    }
+  xSemaphoreGive(gPersistenceMutex);
+  if (ssid.isEmpty()) return false;
+  if (password.isEmpty()) WiFi.begin(ssid.c_str());
+  else WiFi.begin(ssid.c_str(), password.c_str());
+  int64_t deadline = esp_timer_get_time() + 10000000LL;
+  while (WiFi.status() != WL_CONNECTED && esp_timer_get_time() < deadline) {
+    delay(250);
   }
-  return false;
+  return WiFi.status() == WL_CONNECTED;
 }
 
-// Function to clear saved WiFi credentials
+void saveWifiCred(const char* ssid, const char* password) {
+  ensureMutexes();
+  xSemaphoreTake(gPersistenceMutex, portMAX_DELAY);
+  Preferences prefs;
+  if (!prefs.begin("plant", false)) {
+    xSemaphoreGive(gPersistenceMutex);
+    return;
+  }
+  prefs.putString("ssid", ssid ? ssid : "");
+  prefs.putString("password", password ? password : "");
+  prefs.end();
+  xSemaphoreGive(gPersistenceMutex);
+}
+
 bool clearWifiCredentials() {
-  prefs.begin("plant", false);
+  ensureMutexes();
+  xSemaphoreTake(gPersistenceMutex, portMAX_DELAY);
+  Preferences prefs;
+  if (!prefs.begin("plant", false)) {
+    xSemaphoreGive(gPersistenceMutex);
+    return false;
+  }
   prefs.remove("ssid");
   prefs.remove("password");
-  
-  LOG("WiFi credentials cleared.");
+  prefs.end();
+  xSemaphoreGive(gPersistenceMutex);
   return true;
 }
 
-// Mark settings dirty for debounced persistence
-void markSettingsDirty() {
-  settingsDirty = true;
-  settingsDirtyAt = millis();
+bool clearAllSettings() {
+  ensureMutexes();
+  xSemaphoreTake(gPersistenceMutex, portMAX_DELAY);
+  Preferences prefs;
+  bool opened = prefs.begin("plant", false);
+  if (opened) {
+    prefs.clear();
+    prefs.end();
+  }
+  xSemaphoreGive(gPersistenceMutex);
+  if (!opened) return false;
+
+  char defaultName[7];
+  getWifiMacLast6Hex(defaultName);
+  lockConfig();
+  memset(&gSettings, 0, sizeof(gSettings));
+  copyUtf8Truncated(defaultName, gSettings.name, sizeof(gSettings.name));
+  gSettings.waterInterval = 3600;
+  gSettings.dataSyncInterval = 3600;
+  gSettings.activeEnd = 86399;
+  memset(gWorkers, 0, sizeof(gWorkers));
+  gWorkerCount = 0;
+  gRuntime = {READY, false, 0, 0};
+  markDirtyLocked();
+  unlockConfig();
+  initializeClockFromSettings();
+  WorkerNode node{};
+  while (btMainGetNodeAt(0, node)) btMainRemoveNodeByMac(node.mac);
+  saveSettingsNow();
+  return true;
 }
 
-// Called periodically (e.g., from main loop) to persist settings when debounce window elapses
+void markSettingsDirty() {
+  lockConfig();
+  markDirtyLocked();
+  unlockConfig();
+}
+
+void saveSettingsNow() {
+  ensureMutexes();
+  int workerCount = 0;
+  uint32_t generation = 0;
+  xSemaphoreTake(gPersistenceMutex, portMAX_DELAY);
+  lockConfig();
+  gPersistenceSettings = gSettings;
+  memcpy(gPersistenceWorkers, gWorkers, sizeof(gPersistenceWorkers));
+  workerCount = gWorkerCount;
+  generation = gDirtyGeneration;
+  unlockConfig();
+
+  bool saved =
+      writeSnapshot(gPersistenceSettings, gPersistenceWorkers, workerCount);
+  xSemaphoreGive(gPersistenceMutex);
+
+  lockConfig();
+  if (saved && gDirtyGeneration == generation) gSavedGeneration = generation;
+  unlockConfig();
+}
+
 void maybeSaveSettings() {
-  if (settingsDirty && (millis() - settingsDirtyAt > SAVE_DEBOUNCE_MS)) {
-    saveSettings();
-    settingsDirty = false;
-  }
+  lockConfig();
+  bool due = gDirtyGeneration != gSavedGeneration &&
+             esp_timer_get_time() - gDirtyAtUs >= SAVE_DEBOUNCE_US;
+  unlockConfig();
+  if (due) saveSettingsNow();
 }

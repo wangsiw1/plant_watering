@@ -1,5 +1,14 @@
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
 
-bool btEncryptPayload(const uint8_t* in, size_t in_len, const uint8_t target_mac[6], uint16_t nonce, uint8_t* out, size_t &out_len);
-bool btDecryptPayload(const uint8_t* in, size_t in_len, const uint8_t target_mac[6], uint16_t nonce, uint8_t* out, size_t &out_len);
+struct BtMessageId;
+
+bool btCryptoInit();
+bool btEncryptPayload(const uint8_t* in, size_t inLen,
+                      const uint8_t targetMac[6], const BtMessageId& messageId,
+                      uint8_t* out, size_t& outLen);
+bool btDecryptPayload(const uint8_t* in, size_t inLen,
+                      const uint8_t targetMac[6], const BtMessageId& messageId,
+                      uint8_t* out, size_t& outLen);

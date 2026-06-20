@@ -1,116 +1,256 @@
 #include "WateringManager.h"
-#include "Sensor.h"
 #include "BluetoothMain.h"
+#include "BluetoothCommon.h"
+#include "Pump.h"
+#include "Sensor.h"
+#include "Utility.h"
 #include "config.h"
 
+#include <cstring>
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 
-static uint16_t currentNonce = 0;
-static uint8_t currentMac[6] = {0,0,0,0,0,0};
-static unsigned long now_s = millis() / 1000;
-static uint16_t currentPotMask = 0;
-const uint8_t zeroMac[6] = {0,0,0,0,0,0};
+namespace {
+constexpr UBaseType_t MANUAL_QUEUE_LEN = 4;
+constexpr uint32_t WATER_ACK_TIMEOUT_MS = 700;
+constexpr uint32_t WATER_COMPLETION_MARGIN_SECONDS = 5;
 
-void startWatering(const std::vector<const WorkerConfig*>& toWater) {
-  // Group targets by device MAC and send per-pot durations (sequential watering on worker)
-  struct MacGroup { uint8_t mac[6]; WorkerConfig entries[MAX_WORKER_COUNT]; int entryCount; };
-  struct MacGroup groups[MAX_WORKER_COUNT];
-  int groupCount = 0;
-  for (const WorkerConfig* wc : toWater) {
-    bool found = false;
-    for (int gi = 0; gi < groupCount; ++gi) {
-      if (memcmp(groups[gi].mac, wc->mac, 6) == 0) {
-        groups[gi].entries[groups[gi].entryCount++] = *wc;
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      if (groupCount < MAX_WORKER_COUNT) {
-        MacGroup g;
-        memcpy(g.mac, wc->mac, 6);
-        g.entries[0] = *wc;
-        g.entryCount = 1;
-        groups[groupCount++] = g;
-      }
-    }
-  }
+struct ManualWaterRequest {
+  uint8_t mac[6];
+  uint16_t potMask;
+  uint16_t durations[MAX_POTS_PER_DEVICE];
+  uint8_t durationCount;
+};
 
-  for (int gi = 0; gi < groupCount; ++gi) {
-    const MacGroup& g = groups[gi];
-    uint16_t potMask = 0;
-    // Get potCount from WorkerNode for this MAC
-    const WorkerNode* node = btMainFindNodeByMac(g.mac);
-    // build durations in increasing pot-index order for bits set in potMask
-    uint16_t durations[node->potCount];
-    int durCount = 0;
-    for (int pi = 0; pi < node->potCount; ++pi) {
-      for (int ei = 0; ei < g.entryCount; ++ei) {
-        if ((int)g.entries[ei].potIndex == pi) {
-          potMask |= (uint16_t)(1u << pi);
-          durations[durCount++] = g.entries[ei].duration;
-          break;
-        }
-      }
-    }
+QueueHandle_t gManualQueue = nullptr;
+portMUX_TYPE gCompletionMux = portMUX_INITIALIZER_UNLOCKED;
+uint8_t gActiveMac[6] = {};
+uint16_t gActiveMask = 0;
+bool gCompleted = false;
 
-    int tank = getTankLevel();
-    // Only allow watering when tank sensor indicates HIGH (analog > 2800)
-    if (tank <= 2800) break;
+struct PumpStartContext {
+  bool started;
+};
 
-    // build compact CMD_WATER payload: [TYPE][potMask(2)][duration1(2), duration2(2), ...]
-    size_t payload_len = 1 + 2 + durCount * 2;
-    uint8_t payload[5 + durCount * 2];
-    payload[0] = BT_TLV::TYPE_CMD_WATER;
-    payload[1] = (uint8_t)((potMask >> 8) & 0xFF);
-    payload[2] = (uint8_t)(potMask & 0xFF);
-    for (int di = 0; di < durCount; ++di) {
-      uint16_t dv = durations[di];
-      payload[3 + di*2] = (uint8_t)((dv >> 8) & 0xFF);
-      payload[3 + di*2 + 1] = (uint8_t)(dv & 0xFF);
-    }
-
-    bool queued = btMainQueueCommand(g.mac, payload, payload_len, 2, 700);
-    if (queued) {
-      uint32_t bootSec = millis() / 1000;
-      btMainSetNodeLastWater(g.mac, potMask, bootSec);
-      currentPotMask = potMask;
-    } else currentPotMask = 0;
-
-    currentNonce = 0;
-    now_s = millis() / 1000;
-    memcpy(currentMac, g.mac, 6);
-
-    // Wait until worker completed or timeout (sum of durations + small margin)
-    unsigned long totalDur = 0;
-    for (int di = 0; di < durCount; ++di) totalDur += durations[di];
-    const unsigned long margin = 5;
-    while ((((millis()/1000) - now_s) <= (totalDur + margin)) && memcmp(currentMac, zeroMac, 6) != 0) {
-      tank = getTankLevel();
-      if (tank <= 2800) break;
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
+const char* btSendStatusName(BtSendStatus status) {
+  switch (status) {
+    case BtSendStatus::INVALID: return "INVALID";
+    case BtSendStatus::QUEUE_FULL: return "QUEUE_FULL";
+    case BtSendStatus::TRANSMIT_FAILED: return "TRANSMIT_FAILED";
+    case BtSendStatus::SENT: return "SENT";
+    case BtSendStatus::ACKED: return "ACKED";
+    default: return "UNKNOWN";
   }
 }
 
-void onCommandSent(const uint8_t mac[6], uint16_t nonce) {
-  // record nonce for active entries matching mac
-  if (memcmp(currentMac, mac, 6) == 0) {
-    currentNonce = nonce;
-    now_s = millis() / 1000;
+void startPump(void* rawContext) {
+  PumpStartContext* context = static_cast<PumpStartContext*>(rawContext);
+  LOG("Watering pump start");
+  pumpOn();
+  context->started = true;
+}
+
+void beginCompletionWait(const uint8_t mac[6], uint16_t mask) {
+  portENTER_CRITICAL(&gCompletionMux);
+  memcpy(gActiveMac, mac, 6);
+  gActiveMask = mask;
+  gCompleted = false;
+  portEXIT_CRITICAL(&gCompletionMux);
+  char target[13];
+  macToHexLower(mac, target);
+  LOG("Watering completion wait begin worker=%s mask=0x%04x",
+      target, static_cast<unsigned>(mask));
+}
+
+bool completionReceived() {
+  portENTER_CRITICAL(&gCompletionMux);
+  bool completed = gCompleted;
+  portEXIT_CRITICAL(&gCompletionMux);
+  return completed;
+}
+
+void endCompletionWait() {
+  portENTER_CRITICAL(&gCompletionMux);
+  memset(gActiveMac, 0, sizeof(gActiveMac));
+  gActiveMask = 0;
+  gCompleted = false;
+  portEXIT_CRITICAL(&gCompletionMux);
+  LOG("Watering completion wait end");
+}
+}
+
+void wateringManagerInit() {
+  if (!gManualQueue) {
+    gManualQueue = xQueueCreate(MANUAL_QUEUE_LEN, sizeof(ManualWaterRequest));
   }
 }
 
-void onCommandAcked(const uint8_t mac[6], uint16_t nonce) {
-  if (memcmp(currentMac, mac, 6) == 0 && currentNonce == nonce) {
-    currentNonce = 0;
-    now_s = millis() / 1000;
+bool wateringQueueManual(const uint8_t mac[6], uint16_t potMask,
+                         const uint16_t* durations, size_t durationCount) {
+  if (!gManualQueue || !mac || !durations || potMask == 0 ||
+      durationCount == 0 || durationCount > MAX_POTS_PER_DEVICE ||
+      durationCount != static_cast<size_t>(__builtin_popcount(potMask))) {
+    LOG("Watering manual queue rejected reason=invalid_input queue=%p mac=%p mask=0x%04x duration_count=%u",
+        gManualQueue, mac, static_cast<unsigned>(potMask),
+        static_cast<unsigned>(durationCount));
+    return false;
   }
+  ManualWaterRequest request{};
+  memcpy(request.mac, mac, 6);
+  request.potMask = potMask;
+  request.durationCount = durationCount;
+  for (size_t i = 0; i < durationCount; ++i) {
+    if (durations[i] == 0 || durations[i] > 60) {
+      char target[13];
+      macToHexLower(mac, target);
+      LOG("Watering manual queue rejected reason=bad_duration worker=%s index=%u value=%u",
+          target, static_cast<unsigned>(i), static_cast<unsigned>(durations[i]));
+      return false;
+    }
+    request.durations[i] = durations[i];
+  }
+  bool queued = xQueueSend(gManualQueue, &request, 0) == pdTRUE;
+  char target[13];
+  macToHexLower(mac, target);
+  LOG("Watering manual queue worker=%s mask=0x%04x duration_count=%u queued=%u",
+      target, static_cast<unsigned>(potMask),
+      static_cast<unsigned>(durationCount), queued ? 1u : 0u);
+  return queued;
 }
 
-void onWorkerCompleted(const uint8_t mac[6]) {
-  if (memcmp(currentMac, mac, 6) == 0) {
-    memcpy(currentMac, zeroMac, 6);
-    btMainSetNodeLastWater(mac, currentPotMask, now_s);
-    currentPotMask = 0;
+bool wateringProcessOneManual() {
+  if (!gManualQueue) return false;
+  ManualWaterRequest request{};
+  if (xQueueReceive(gManualQueue, &request, 0) != pdTRUE) return false;
+  char target[13];
+  macToHexLower(request.mac, target);
+  LOG("Watering manual dequeue worker=%s mask=0x%04x duration_count=%u",
+      target, static_cast<unsigned>(request.potMask),
+      static_cast<unsigned>(request.durationCount));
+  setRuntimeState(WATERING);
+  bool completed = wateringExecuteWorker(request.mac, request.potMask,
+                                         request.durations,
+                                         request.durationCount, false);
+  LOG("Watering manual complete worker=%s mask=0x%04x completed=%u",
+      target, static_cast<unsigned>(request.potMask), completed ? 1u : 0u);
+  setRuntimeState(READY);
+  return true;
+}
+
+bool wateringExecuteWorker(const uint8_t mac[6], uint16_t potMask,
+                           const uint16_t* durations, size_t durationCount,
+                           bool usePump) {
+  if (!mac || !durations || potMask == 0 || durationCount == 0 ||
+      durationCount > MAX_POTS_PER_DEVICE ||
+      durationCount != static_cast<size_t>(__builtin_popcount(potMask))) {
+    LOG("Watering execute rejected reason=invalid_input mac=%p mask=0x%04x duration_count=%u use_pump=%u",
+        mac, static_cast<unsigned>(potMask), static_cast<unsigned>(durationCount),
+        usePump ? 1u : 0u);
+    return false;
   }
+
+  char target[13];
+  macToHexLower(mac, target);
+  unsigned long totalSeconds = 0;
+  uint8_t durationBytes[MAX_POTS_PER_DEVICE * 2];
+  for (size_t i = 0; i < durationCount; ++i) {
+    if (durations[i] == 0 || durations[i] > 60) {
+      LOG("Watering execute rejected reason=bad_duration worker=%s index=%u value=%u",
+          target, static_cast<unsigned>(i), static_cast<unsigned>(durations[i]));
+      return false;
+    }
+    totalSeconds += durations[i];
+    durationBytes[i * 2] = static_cast<uint8_t>(durations[i] >> 8);
+    durationBytes[i * 2 + 1] = static_cast<uint8_t>(durations[i]);
+  }
+  LOG("Watering execute start worker=%s mask=0x%04x duration_count=%u total_seconds=%lu use_pump=%u",
+      target, static_cast<unsigned>(potMask), static_cast<unsigned>(durationCount),
+      totalSeconds, usePump ? 1u : 0u);
+  // Detailed value log for future debugging:
+  // for (size_t i = 0; i < durationCount; ++i) LOG("Watering duration[%u]=%u", i, durations[i]);
+
+  BT_TLV::BtBodyBuilder body;
+  BT_TLV::btBodyBegin(body, BT_TLV::TYPE_CMD_WATER);
+  if (!BT_TLV::btTlvAppendU16(body, BT_TLV::FIELD_POT_MASK, potMask) ||
+      !BT_TLV::btTlvAppend(body, BT_TLV::FIELD_DURATION_LIST,
+                           durationBytes, durationCount * 2)) {
+    LOG("Watering execute rejected reason=build_failed worker=%s mask=0x%04x",
+        target, static_cast<unsigned>(potMask));
+    return false;
+  }
+
+  if (usePump && getTankLevel() <= 2800) {
+    LOG("Watering execute rejected reason=tank_low worker=%s tank_mv=%u",
+        target, static_cast<unsigned>(getTankLevel()));
+    return false;
+  }
+  beginCompletionWait(mac, potMask);
+  PumpStartContext pumpContext{};
+  BtSendResult sent = btMainSendCommand(
+      mac, body.data, body.len, 0, WATER_ACK_TIMEOUT_MS,
+      usePump ? startPump : nullptr, usePump ? &pumpContext : nullptr);
+  char ack[13];
+  macToHexLower(sent.ackMac, ack);
+  LOG("Watering command result worker=%s mask=0x%04x status=%s started=%u ack=%s id=%08lx%08lx:%lu",
+      target, static_cast<unsigned>(potMask), btSendStatusName(sent.status),
+      sent.transmissionStarted ? 1u : 0u, ack,
+      static_cast<unsigned long>(sent.messageId.sessionId >> 32),
+      static_cast<unsigned long>(sent.messageId.sessionId & 0xFFFFFFFFULL),
+      static_cast<unsigned long>(sent.messageId.sequence));
+  if (!sent.transmissionStarted) {
+    endCompletionWait();
+    return false;
+  }
+
+  int64_t deadlineUs =
+      sent.startedUs +
+      static_cast<int64_t>(totalSeconds + WATER_COMPLETION_MARGIN_SECONDS) *
+          1000000LL;
+  while (!completionReceived() && esp_timer_get_time() < deadlineUs) {
+    if (usePump && getTankLevel() <= 2800) {
+      LOG("Watering wait abort reason=tank_low worker=%s tank_mv=%u",
+          target, static_cast<unsigned>(getTankLevel()));
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+  bool completed = completionReceived();
+  if (!completed) {
+    LOG("Watering wait ended worker=%s mask=0x%04x completed=0 deadline_reached=%u",
+        target, static_cast<unsigned>(potMask),
+        esp_timer_get_time() >= deadlineUs ? 1u : 0u);
+  }
+  if (pumpContext.started) {
+    LOG("Watering pump stop");
+    pumpOff();
+  }
+  endCompletionWait();
+
+  if (completed) {
+    LOG("Watering completed worker=%s mask=0x%04x",
+        target, static_cast<unsigned>(potMask));
+    btMainMarkNodeWatered(mac, potMask);
+    uint64_t utc = getCurrentEpochSec();
+    if (usePump && utc != 0) setLastWateringUtc(utc);
+  }
+  LOG("Watering execute result worker=%s mask=0x%04x completed=%u",
+      target, static_cast<unsigned>(potMask), completed ? 1u : 0u);
+  return completed;
+}
+
+void wateringNotifyCompleted(const uint8_t mac[6], uint16_t potMask) {
+  if (!mac) return;
+  char target[13];
+  macToHexLower(mac, target);
+  bool matched = false;
+  portENTER_CRITICAL(&gCompletionMux);
+  if (memcmp(gActiveMac, mac, 6) == 0 && gActiveMask == potMask) {
+    gCompleted = true;
+    matched = true;
+  }
+  portEXIT_CRITICAL(&gCompletionMux);
+  LOG("Watering completion notify worker=%s mask=0x%04x matched=%u",
+      target, static_cast<unsigned>(potMask), matched ? 1u : 0u);
 }
