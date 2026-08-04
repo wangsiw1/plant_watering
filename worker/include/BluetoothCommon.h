@@ -45,6 +45,7 @@ namespace BT_TLV {
   constexpr uint8_t TYPE_CMD_PROBE = 0x30;
   constexpr uint8_t TYPE_CMD_SLEEP = 0x31;
   constexpr uint8_t TYPE_CMD_WATER = 0x32;
+  constexpr uint8_t TYPE_CMD_OTA_PREPARE = 0x33;
   constexpr uint8_t TYPE_STATUS = 0x40;
   constexpr uint8_t TYPE_CONFIG = 0x41;
   constexpr uint8_t TYPE_EVENT_WATER_DONE = 0x42;

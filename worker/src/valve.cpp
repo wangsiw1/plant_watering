@@ -2,29 +2,88 @@
 #include "Utility.h"
 #include <Arduino.h>
 #include "HardwareConfig.h"
+#include "esp_timer.h"
+#include "freertos/semphr.h"
 
 static volatile uint16_t gValveState = 0;
+static int64_t gBatteryBlockedUntilUs = 0;
+static SemaphoreHandle_t gValveBatteryMutex = nullptr;
+static constexpr int64_t BATTERY_RECOVERY_US = 5000000LL;
+
+static void ensureValveBatteryMutex() {
+  if (!gValveBatteryMutex) gValveBatteryMutex = xSemaphoreCreateMutex();
+}
+
+static uint16_t setValveState(uint16_t nextState) {
+  ensureValveBatteryMutex();
+  int64_t nowUs = esp_timer_get_time();
+  xSemaphoreTake(gValveBatteryMutex, portMAX_DELAY);
+  uint16_t previousState = gValveState;
+  gValveState = nextState;
+  if (previousState != 0 && nextState == 0) {
+    gBatteryBlockedUntilUs = nowUs + BATTERY_RECOVERY_US;
+  }
+  xSemaphoreGive(gValveBatteryMutex);
+  return nextState;
+}
+
+static uint16_t updateValveBit(uint8_t idx, bool enabled) {
+  ensureValveBatteryMutex();
+  int64_t nowUs = esp_timer_get_time();
+  xSemaphoreTake(gValveBatteryMutex, portMAX_DELAY);
+  uint16_t previousState = gValveState;
+  uint16_t nextState = enabled
+                           ? static_cast<uint16_t>(previousState | (1u << idx))
+                           : static_cast<uint16_t>(previousState & ~(1u << idx));
+  gValveState = nextState;
+  if (previousState != 0 && nextState == 0) {
+    gBatteryBlockedUntilUs = nowUs + BATTERY_RECOVERY_US;
+  }
+  xSemaphoreGive(gValveBatteryMutex);
+  return nextState;
+}
+
+static void resetValveState() {
+  ensureValveBatteryMutex();
+  xSemaphoreTake(gValveBatteryMutex, portMAX_DELAY);
+  gValveState = 0;
+  gBatteryBlockedUntilUs = 0;
+  xSemaphoreGive(gValveBatteryMutex);
+}
+
+bool valveBeginBatterySampling() {
+  ensureValveBatteryMutex();
+  int64_t nowUs = esp_timer_get_time();
+  xSemaphoreTake(gValveBatteryMutex, portMAX_DELAY);
+  bool allowed = gValveState == 0 && nowUs >= gBatteryBlockedUntilUs;
+  if (!allowed) xSemaphoreGive(gValveBatteryMutex);
+  return allowed;
+}
+
+void valveEndBatterySampling() {
+  if (gValveBatteryMutex) xSemaphoreGive(gValveBatteryMutex);
+}
 
 #if WORKER_POT_COUNT == 1
 
 void valveBegin() {
   pinMode(VALVE_PIN, OUTPUT);
   digitalWrite(VALVE_PIN, LOW);
-  gValveState = 0;
+  resetValveState();
 }
 
 void valveOn(uint8_t idx) {
   (void)idx;
   LOG("Valve on");
+  setValveState(1);
   digitalWrite(VALVE_PIN, HIGH);
-  gValveState = 1;
 }
 
 void valveOff(uint8_t idx) {
   (void)idx;
   LOG("Valve off");
+  setValveState(0);
   digitalWrite(VALVE_PIN, LOW);
-  gValveState = 0;
 }
 
 void valveSetMask(uint16_t mask) {
@@ -53,25 +112,22 @@ void valveBegin() {
   pinMode(SHIFT_CLOCK_PIN, OUTPUT);
   pinMode(SHIFT_LATCH_PIN, OUTPUT);
   digitalWrite(SHIFT_LATCH_PIN, LOW);
-  gValveState = 0;
+  resetValveState();
   writeShiftRegisters(0);
 }
 
 void valveOn(uint8_t idx) {
   if (idx >= WORKER_POT_COUNT) return;
-  gValveState |= (1u << idx);
-  writeShiftRegisters(gValveState);
+  writeShiftRegisters(updateValveBit(idx, true));
 }
 
 void valveOff(uint8_t idx) {
   if (idx >= WORKER_POT_COUNT) return;
-  gValveState &= ~(1u << idx);
-  writeShiftRegisters(gValveState);
+  writeShiftRegisters(updateValveBit(idx, false));
 }
 
 void valveSetMask(uint16_t mask) {
-  gValveState = mask & VALVE_MASK_ALL;
-  writeShiftRegisters(gValveState);
+  writeShiftRegisters(setValveState(mask & VALVE_MASK_ALL));
 }
 
 #endif

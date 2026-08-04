@@ -1,4 +1,5 @@
 .pio/
+*.ota
 .vscode/
 .github/
 debug.log

@@ -64,6 +64,7 @@ const char* btTypeName(uint8_t type) {
     case BT_TLV::TYPE_CMD_PROBE: return "CMD_PROBE";
     case BT_TLV::TYPE_CMD_SLEEP: return "CMD_SLEEP";
     case BT_TLV::TYPE_CMD_WATER: return "CMD_WATER";
+    case BT_TLV::TYPE_CMD_OTA_PREPARE: return "CMD_OTA_PREPARE";
     case BT_TLV::TYPE_STATUS: return "STATUS";
     case BT_TLV::TYPE_CONFIG: return "CONFIG";
     case BT_TLV::TYPE_EVENT_WATER_DONE: return "EVENT_WATER_DONE";

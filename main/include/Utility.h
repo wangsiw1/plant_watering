@@ -23,13 +23,5 @@ void macToHexLower(const uint8_t mac[6], char out[13]);
 void getBtMacHex(char out[13]);
 void getWifiMacLast6Hex(char out[7]);
 
-void initializeClockFromSettings();
-bool isClockValid();
-bool setUserTimeOfDaySec(uint32_t secOfDay);
-uint32_t getCurrentTimeOfDaySec();
-void setUserEpoch(uint64_t epochSec);
-uint64_t getCurrentEpochSec();
-bool trySyncNTP(unsigned long timeoutMs = 10000);
-
 uint8_t calculateBatteryPercent(uint16_t batteryMv);
 uint16_t getCorrectedSoilMoisture(uint16_t batteryMv, uint16_t sensorMv);

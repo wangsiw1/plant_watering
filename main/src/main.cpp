@@ -9,13 +9,24 @@
 #include "WebUI.h"
 #include "BluetoothMain.h"
 #include "Utility.h"
+#include "ClockManager.h"
 #include "WateringManager.h"
+#include "OtaManager.h"
+#include "WorkerOtaManager.h"
 #include "esp_timer.h"
 
 namespace {
 constexpr int64_t MANUAL_SYNC_INTERVAL_US = 30000000LL;
 constexpr uint32_t STATUS_WAIT_MS = 3000;
 constexpr uint32_t AUTO_WAKE_PADDING_MS = 30000;
+constexpr uint16_t TANK_MINIMUM_MV = 2800;
+
+struct AutoWaterRequest {
+  uint8_t mac[6];
+  uint16_t potMask;
+  uint16_t durations[MAX_POTS_PER_DEVICE];
+  uint8_t durationCount;
+};
 
 const char* btSendStatusName(BtSendStatus status) {
   switch (status) {
@@ -29,6 +40,7 @@ const char* btSendStatusName(BtSendStatus status) {
 }
 
 bool synchronizeWorker(const WorkerConfig& worker, int64_t cycleStartUs) {
+  if (workerOtaIsActive()) return false;
   char workerMac[13];
   macToHexLower(worker.mac, workerMac);
   WorkerNode before{};
@@ -76,7 +88,7 @@ int synchronizeConfiguredWorkers(int64_t cycleStartUs) {
 }
 
 bool wateringWindowOpen(const Settings& settings) {
-  uint32_t secondOfDay = getCurrentTimeOfDaySec();
+  uint32_t secondOfDay = clockGetCurrentTimeOfDaySec();
   if (settings.activeStart <= settings.activeEnd) {
     return secondOfDay >= settings.activeStart &&
            secondOfDay <= settings.activeEnd;
@@ -94,6 +106,8 @@ bool wateringCooldownComplete(const Settings& settings, uint64_t nowUtc) {
 void waterFreshWorkers(int64_t cycleStartUs) {
   int count = getWorkerConfigCount();
   LOG("WaterTask watering fresh workers start count=%d", count);
+  AutoWaterRequest requests[MAX_WORKER_COUNT] = {};
+  int requestCount = 0;
   for (int i = 0; i < count; ++i) {
     WorkerConfig worker{};
     WorkerNode node{};
@@ -112,29 +126,91 @@ void waterFreshWorkers(int64_t cycleStartUs) {
     macToHexLower(worker.mac, workerMac);
     int potCount = min(static_cast<int>(worker.potCount),
                        static_cast<int>(node.potCount));
-    uint16_t mask = 0;
-    uint16_t durations[MAX_POTS_PER_DEVICE] = {};
-    size_t durationCount = 0;
+    AutoWaterRequest request{};
+    memcpy(request.mac, worker.mac, sizeof(request.mac));
     for (int pot = 0; pot < potCount; ++pot) {
       uint16_t correctedSoil =
           getCorrectedSoilMoisture(node.batteryMv, node.soils[pot]);
       if (node.soils[pot] > 200 &&
           correctedSoil > worker.thresholds[pot]) {
-        mask |= static_cast<uint16_t>(1u << pot);
-        durations[durationCount++] = worker.durations[pot];
+        request.potMask |= static_cast<uint16_t>(1u << pot);
+        request.durations[request.durationCount++] = worker.durations[pot];
       }
     }
     LOG("WaterTask watering decision worker=%s pot_count=%d mask=0x%04x duration_count=%u",
-        workerMac, potCount, static_cast<unsigned>(mask),
-        static_cast<unsigned>(durationCount));
-    if (mask != 0) {
-      bool completed =
-          wateringExecuteWorker(worker.mac, mask, durations, durationCount, true);
-      LOG("WaterTask watering worker=%s completed=%u",
-          workerMac, completed ? 1u : 0u);
+        workerMac, potCount, static_cast<unsigned>(request.potMask),
+        static_cast<unsigned>(request.durationCount));
+    if (request.potMask != 0 && requestCount < MAX_WORKER_COUNT) {
+      requests[requestCount++] = request;
     }
   }
-  LOG("WaterTask watering fresh workers end");
+
+  if (requestCount == 0) {
+    LOG("WaterTask watering fresh workers end reason=no_candidates");
+    return;
+  }
+  if (getTankLevel() <= TANK_MINIMUM_MV) {
+    LOG("WaterTask watering batch rejected reason=tank_low tank_mv=%u",
+        static_cast<unsigned>(getTankLevel()));
+    return;
+  }
+
+  Settings settings{};
+  getSettingsSnapshot(settings);
+  LOG("WaterTask watering pump start candidates=%d prime_seconds=%u",
+      requestCount, static_cast<unsigned>(settings.pumpDelaySeconds));
+  pumpOn();
+
+  int64_t primeDeadlineUs =
+      esp_timer_get_time() +
+      static_cast<int64_t>(settings.pumpDelaySeconds) * 1000000LL;
+  bool tankLow = false;
+  while (esp_timer_get_time() < primeDeadlineUs) {
+    if (getTankLevel() <= TANK_MINIMUM_MV) {
+      tankLow = true;
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+  if (getTankLevel() <= TANK_MINIMUM_MV) tankLow = true;
+
+  bool anyCompleted = false;
+  if (!tankLow) {
+    for (int i = 0; i < requestCount; ++i) {
+      if (getTankLevel() <= TANK_MINIMUM_MV) {
+        tankLow = true;
+        LOG("WaterTask watering batch abort reason=tank_low index=%d tank_mv=%u",
+            i, static_cast<unsigned>(getTankLevel()));
+        break;
+      }
+      AutoWaterRequest& request = requests[i];
+      char workerMac[13];
+      macToHexLower(request.mac, workerMac);
+      bool completed = wateringExecuteWorker(
+          request.mac, request.potMask, request.durations,
+          request.durationCount, true);
+      if (completed) anyCompleted = true;
+      LOG("WaterTask watering worker=%s completed=%u",
+          workerMac, completed ? 1u : 0u);
+      if (getTankLevel() <= TANK_MINIMUM_MV) {
+        tankLow = true;
+        LOG("WaterTask watering batch abort reason=tank_low_after_worker worker=%s tank_mv=%u",
+            workerMac, static_cast<unsigned>(getTankLevel()));
+        break;
+      }
+    }
+  } else {
+    LOG("WaterTask watering batch abort reason=tank_low_during_priming tank_mv=%u",
+        static_cast<unsigned>(getTankLevel()));
+  }
+
+  LOG("WaterTask watering pump stop");
+  pumpOff();
+  if (anyCompleted) {
+    clockRecordLastWateringNow();
+  }
+  LOG("WaterTask watering fresh workers end completed=%u tank_low=%u",
+      anyCompleted ? 1u : 0u, tankLow ? 1u : 0u);
 }
 
 void sendWorkerToSleepAt(const uint8_t mac[6], int64_t wakeAtUs) {
@@ -201,9 +277,13 @@ void TaskWatering(void*) {
   int64_t lastAutoWaitLogUs = 0;
   bool previousAuto = false;
   bool loggedManualMode = false;
-  bool loggedClockInvalid = false;
 
   for (;;) {
+    if (otaIsActive() || workerOtaIsActive()) {
+      setRuntimeState(UPDATING);
+      vTaskDelay(pdMS_TO_TICKS(250));
+      continue;
+    }
     bool automatic = getAutoEnabled();
     if (!automatic) {
       if (!loggedManualMode || previousAuto) {
@@ -216,6 +296,7 @@ void TaskWatering(void*) {
       if (wateringProcessOneManual()) continue;
       int64_t nowUs = esp_timer_get_time();
       if (lastSyncUs == 0 || nowUs - lastSyncUs >= MANUAL_SYNC_INTERVAL_US) {
+        if (otaIsActive() || workerOtaIsActive()) continue;
         LOG("WaterTask manual sync due now_us=%lld last_sync_us=%lld",
             static_cast<long long>(nowUs), static_cast<long long>(lastSyncUs));
         setRuntimeState(SYNCING);
@@ -235,18 +316,7 @@ void TaskWatering(void*) {
       setDataSyncRuntime(0, 0);
       previousAuto = true;
       loggedManualMode = false;
-      loggedClockInvalid = false;
     }
-    if (!isClockValid()) {
-      if (!loggedClockInvalid) {
-        LOG("WaterTask auto wait reason=clock_invalid");
-        loggedClockInvalid = true;
-      }
-      setRuntimeState(READY);
-      vTaskDelay(pdMS_TO_TICKS(500));
-      continue;
-    }
-    loggedClockInvalid = false;
 
     Settings settings{};
     getSettingsSnapshot(settings);
@@ -266,23 +336,26 @@ void TaskWatering(void*) {
     }
     lastAutoWaitLogUs = 0;
 
+    if (otaIsActive() || workerOtaIsActive()) continue;
     setRuntimeState(SYNCING);
     LOG("WaterTask auto sync wake padding_ms=%lu",
         static_cast<unsigned long>(AUTO_WAKE_PADDING_MS));
     vTaskDelay(pdMS_TO_TICKS(AUTO_WAKE_PADDING_MS));
+    if (otaIsActive() || workerOtaIsActive()) continue;
     int64_t cycleStartUs = esp_timer_get_time();
     synchronizeConfiguredWorkers(cycleStartUs);
     lastSyncUs = esp_timer_get_time();
     int64_t completedSyncUs = lastSyncUs;
 
-    uint64_t nowUtc = getCurrentEpochSec();
-    bool clockOk = nowUtc != 0;
+    uint64_t nowUtc = clockGetCurrentEpochSec();
+    bool clockOk = clockIsValid() && nowUtc != 0;
     bool windowOpen = clockOk && wateringWindowOpen(settings);
     bool cooldownComplete = clockOk && wateringCooldownComplete(settings, nowUtc);
     LOG("WaterTask auto watering gate utc=%lu window_open=%u cooldown_complete=%u",
         static_cast<unsigned long>(nowUtc), windowOpen ? 1u : 0u,
         cooldownComplete ? 1u : 0u);
     if (clockOk && windowOpen && cooldownComplete) {
+      if (otaIsActive() || workerOtaIsActive()) continue;
       setRuntimeState(WATERING);
       waterFreshWorkers(cycleStartUs);
     } else {
@@ -301,6 +374,8 @@ void TaskWatering(void*) {
 
 void setup() {
   Serial.begin(115200);
+  otaManagerInit();
+  workerOtaManagerInit();
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
   vTaskDelay(pdMS_TO_TICKS(3000));
   char btmac[13];
@@ -308,7 +383,7 @@ void setup() {
   LOG("Bluetooth MAC address: %s", btmac);
 
   loadSettings();
-  initializeClockFromSettings();
+  clockManagerInit();
 
   WiFiProvisioner provisioner;
   provisioner.onSuccess([](const char* ssid, const char* password, const char*) {
@@ -321,7 +396,8 @@ void setup() {
     provisioner.startProvisioning();
     while (WiFi.status() != WL_CONNECTED) delay(500);
   }
-  trySyncNTP(10000);
+  initializeWiFiMaintenance();
+  clockRequestNtpSync();
 
   pumpBegin();
   sensorBegin();
@@ -341,14 +417,21 @@ void setup() {
   TaskHandle_t webTask = nullptr;
   TaskHandle_t sensorTask = nullptr;
   TaskHandle_t wateringTask = nullptr;
-  xTaskCreate(TaskWeb, "webTask", 6144, nullptr, 1, &webTask);
   xTaskCreate(TaskSensor, "sensorTask", 2048, nullptr, 2, &sensorTask);
   xTaskCreate(TaskWatering, "waterTask", 8192, nullptr, 2, &wateringTask);
+  if (!otaMarkRunningAppValid()) {
+    LOG("OTA running app validation did not complete");
+  }
+  xTaskCreate(TaskWeb, "webTask", 6144, nullptr, 1, &webTask);
   webSetDiagnosticsTaskHandles(xTaskGetCurrentTaskHandle(), webTask,
                                sensorTask, wateringTask);
 }
 
 void loop() {
+  serviceWiFiMaintenance();
+  clockManagerLoop();
+  otaManagerLoop();
+  workerOtaManagerLoop();
   maybeSaveSettings();
   vTaskDelay(pdMS_TO_TICKS(1000));
 }

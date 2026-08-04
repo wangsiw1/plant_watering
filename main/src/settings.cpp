@@ -1,5 +1,6 @@
 #include "config.h"
 #include "BluetoothMain.h"
+#include "ClockManager.h"
 
 #include <Preferences.h>
 #include <WiFi.h>
@@ -13,6 +14,11 @@ constexpr uint32_t WATER_INTERVAL_MIN = 60;
 constexpr uint32_t WATER_INTERVAL_MAX = 2419200;
 constexpr uint32_t DATA_SYNC_INTERVAL_MIN = 60;
 constexpr uint32_t DATA_SYNC_INTERVAL_MAX = 2419200;
+constexpr uint8_t PUMP_DELAY_SECONDS_DEFAULT = 1;
+constexpr uint8_t PUMP_DELAY_SECONDS_MAX = 30;
+constexpr uint8_t MANUAL_PUMP_TIMEOUT_SECONDS_DEFAULT = 10;
+constexpr uint8_t MANUAL_PUMP_TIMEOUT_SECONDS_MIN = 1;
+constexpr uint8_t MANUAL_PUMP_TIMEOUT_SECONDS_MAX = 60;
 constexpr uint16_t DEFAULT_THRESHOLD = 2000;
 constexpr uint16_t DEFAULT_DURATION = 5;
 constexpr int64_t SAVE_DEBOUNCE_US = 5000000LL;
@@ -28,6 +34,12 @@ SemaphoreHandle_t gPersistenceMutex = nullptr;
 uint32_t gDirtyGeneration = 0;
 uint32_t gSavedGeneration = 0;
 int64_t gDirtyAtUs = 0;
+bool gWifiCredentialsAvailable = false;
+bool gWifiWasConnected = false;
+uint8_t gWifiReconnectAttempt = 0;
+int64_t gNextWifiReconnectUs = 0;
+
+constexpr uint32_t WIFI_RECONNECT_DELAYS_MS[] = {5000, 15000, 30000, 60000};
 
 void ensureMutexes() {
   if (!gConfigMutex) gConfigMutex = xSemaphoreCreateMutex();
@@ -73,6 +85,9 @@ bool validSettings(const Settings& value) {
          value.waterInterval <= WATER_INTERVAL_MAX &&
          value.dataSyncInterval >= DATA_SYNC_INTERVAL_MIN &&
          value.dataSyncInterval <= DATA_SYNC_INTERVAL_MAX &&
+         value.pumpDelaySeconds <= PUMP_DELAY_SECONDS_MAX &&
+         value.manualPumpTimeoutSeconds >= MANUAL_PUMP_TIMEOUT_SECONDS_MIN &&
+         value.manualPumpTimeoutSeconds <= MANUAL_PUMP_TIMEOUT_SECONDS_MAX &&
          value.activeStart < 86400 && value.activeEnd < 86400 &&
          value.tzOffsetMinutes >= -14 * 60 &&
          value.tzOffsetMinutes <= 14 * 60;
@@ -89,6 +104,11 @@ bool writeSnapshot(const Settings& settings,
     prefs.putUInt("wint", settings.waterInterval);
   if (prefs.getUInt("dsint", 0) != settings.dataSyncInterval)
     prefs.putUInt("dsint", settings.dataSyncInterval);
+  if (prefs.getUChar("pdelay", UINT8_MAX) != settings.pumpDelaySeconds)
+    prefs.putUChar("pdelay", settings.pumpDelaySeconds);
+  if (prefs.getUChar("mptime", UINT8_MAX) !=
+      settings.manualPumpTimeoutSeconds)
+    prefs.putUChar("mptime", settings.manualPumpTimeoutSeconds);
   if (prefs.getUInt("start", UINT32_MAX) != settings.activeStart)
     prefs.putUInt("start", settings.activeStart);
   if (prefs.getUInt("end", UINT32_MAX) != settings.activeEnd)
@@ -157,6 +177,8 @@ void loadSettings() {
   copyUtf8Truncated(defaultName, loaded.name, sizeof(loaded.name));
   loaded.waterInterval = 3600;
   loaded.dataSyncInterval = 3600;
+  loaded.pumpDelaySeconds = PUMP_DELAY_SECONDS_DEFAULT;
+  loaded.manualPumpTimeoutSeconds = MANUAL_PUMP_TIMEOUT_SECONDS_DEFAULT;
   loaded.activeStart = 0;
   loaded.activeEnd = 86399;
 
@@ -170,6 +192,12 @@ void loadSettings() {
         constrain(prefs.getUInt("wint", 3600), WATER_INTERVAL_MIN, WATER_INTERVAL_MAX);
     loaded.dataSyncInterval =
         constrain(prefs.getUInt("dsint", 3600), DATA_SYNC_INTERVAL_MIN, DATA_SYNC_INTERVAL_MAX);
+    loaded.pumpDelaySeconds = static_cast<uint8_t>(constrain(
+        prefs.getUChar("pdelay", PUMP_DELAY_SECONDS_DEFAULT), 0,
+        PUMP_DELAY_SECONDS_MAX));
+    loaded.manualPumpTimeoutSeconds = static_cast<uint8_t>(constrain(
+        prefs.getUChar("mptime", MANUAL_PUMP_TIMEOUT_SECONDS_DEFAULT),
+        MANUAL_PUMP_TIMEOUT_SECONDS_MIN, MANUAL_PUMP_TIMEOUT_SECONDS_MAX));
     loaded.activeStart =
         min(prefs.getUInt("start", 0), static_cast<uint32_t>(86399));
     loaded.activeEnd =
@@ -442,7 +470,11 @@ bool connectToWiFi() {
   String password = prefs.getString("password", "");
   prefs.end();
   xSemaphoreGive(gPersistenceMutex);
+  lockConfig();
+  gWifiCredentialsAvailable = !ssid.isEmpty();
+  unlockConfig();
   if (ssid.isEmpty()) return false;
+  WiFi.setAutoReconnect(true);
   if (password.isEmpty()) WiFi.begin(ssid.c_str());
   else WiFi.begin(ssid.c_str(), password.c_str());
   int64_t deadline = esp_timer_get_time() + 10000000LL;
@@ -450,6 +482,58 @@ bool connectToWiFi() {
     delay(250);
   }
   return WiFi.status() == WL_CONNECTED;
+}
+
+void initializeWiFiMaintenance() {
+  WiFi.setAutoReconnect(true);
+  lockConfig();
+  gWifiWasConnected = WiFi.status() == WL_CONNECTED;
+  gWifiReconnectAttempt = 0;
+  gNextWifiReconnectUs = 0;
+  unlockConfig();
+}
+
+void serviceWiFiMaintenance() {
+  bool connected = WiFi.status() == WL_CONNECTED;
+  bool requestNtp = false;
+  bool reconnect = false;
+  int64_t nowUs = esp_timer_get_time();
+
+  lockConfig();
+  if (connected) {
+    requestNtp = !gWifiWasConnected;
+    gWifiWasConnected = true;
+    gWifiReconnectAttempt = 0;
+    gNextWifiReconnectUs = 0;
+  } else {
+    if (gWifiWasConnected || gNextWifiReconnectUs == 0) {
+      gWifiWasConnected = false;
+      gWifiReconnectAttempt = 0;
+      gNextWifiReconnectUs =
+          nowUs + static_cast<int64_t>(WIFI_RECONNECT_DELAYS_MS[0]) * 1000;
+    } else if (gWifiCredentialsAvailable && nowUs >= gNextWifiReconnectUs) {
+      reconnect = true;
+      size_t delayIndex = min(
+          static_cast<size_t>(gWifiReconnectAttempt + 1),
+          sizeof(WIFI_RECONNECT_DELAYS_MS) / sizeof(WIFI_RECONNECT_DELAYS_MS[0]) - 1);
+      gNextWifiReconnectUs =
+          nowUs + static_cast<int64_t>(WIFI_RECONNECT_DELAYS_MS[delayIndex]) * 1000;
+      if (gWifiReconnectAttempt <
+          sizeof(WIFI_RECONNECT_DELAYS_MS) / sizeof(WIFI_RECONNECT_DELAYS_MS[0]) - 1) {
+        ++gWifiReconnectAttempt;
+      }
+    }
+  }
+  unlockConfig();
+
+  if (reconnect) {
+    LOG("WiFi reconnect attempt=%u", static_cast<unsigned>(gWifiReconnectAttempt));
+    WiFi.reconnect();
+  }
+  if (requestNtp) {
+    LOG("WiFi reconnected; requesting NTP sync");
+    clockRequestNtpSync();
+  }
 }
 
 void saveWifiCred(const char* ssid, const char* password) {
@@ -464,6 +548,9 @@ void saveWifiCred(const char* ssid, const char* password) {
   prefs.putString("password", password ? password : "");
   prefs.end();
   xSemaphoreGive(gPersistenceMutex);
+  lockConfig();
+  gWifiCredentialsAvailable = ssid && ssid[0] != '\0';
+  unlockConfig();
 }
 
 bool clearWifiCredentials() {
@@ -478,6 +565,9 @@ bool clearWifiCredentials() {
   prefs.remove("password");
   prefs.end();
   xSemaphoreGive(gPersistenceMutex);
+  lockConfig();
+  gWifiCredentialsAvailable = false;
+  unlockConfig();
   return true;
 }
 
@@ -500,13 +590,17 @@ bool clearAllSettings() {
   copyUtf8Truncated(defaultName, gSettings.name, sizeof(gSettings.name));
   gSettings.waterInterval = 3600;
   gSettings.dataSyncInterval = 3600;
+  gSettings.pumpDelaySeconds = PUMP_DELAY_SECONDS_DEFAULT;
+  gSettings.manualPumpTimeoutSeconds =
+      MANUAL_PUMP_TIMEOUT_SECONDS_DEFAULT;
   gSettings.activeEnd = 86399;
   memset(gWorkers, 0, sizeof(gWorkers));
   gWorkerCount = 0;
   gRuntime = {READY, false, 0, 0};
+  gWifiCredentialsAvailable = false;
   markDirtyLocked();
   unlockConfig();
-  initializeClockFromSettings();
+  clockResetToDefault();
   WorkerNode node{};
   while (btMainGetNodeAt(0, node)) btMainRemoveNodeByMac(node.mac);
   saveSettingsNow();

@@ -27,6 +27,7 @@ const char* btTypeName(uint8_t type) {
     case TYPE_CMD_PROBE: return "CMD_PROBE";
     case TYPE_CMD_SLEEP: return "CMD_SLEEP";
     case TYPE_CMD_WATER: return "CMD_WATER";
+    case TYPE_CMD_OTA_PREPARE: return "CMD_OTA_PREPARE";
     case TYPE_STATUS: return "STATUS";
     case TYPE_CONFIG: return "CONFIG";
     case TYPE_EVENT_WATER_DONE: return "EVENT_WATER_DONE";

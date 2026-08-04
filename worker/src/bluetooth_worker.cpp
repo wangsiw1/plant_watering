@@ -5,6 +5,7 @@
 #include "Utility.h"
 #include "Valve.h"
 #include "HardwareConfig.h"
+#include "WorkerOtaService.h"
 
 #include <NimBLEDevice.h>
 #include <cstring>
@@ -43,6 +44,7 @@ const char* btTypeName(uint8_t type) {
     case TYPE_CMD_PROBE: return "CMD_PROBE";
     case TYPE_CMD_SLEEP: return "CMD_SLEEP";
     case TYPE_CMD_WATER: return "CMD_WATER";
+    case TYPE_CMD_OTA_PREPARE: return "CMD_OTA_PREPARE";
     case TYPE_STATUS: return "STATUS";
     case TYPE_CONFIG: return "CONFIG";
     case TYPE_EVENT_WATER_DONE: return "EVENT_WATER_DONE";
@@ -128,6 +130,7 @@ bool validateCommand(const uint8_t* body, size_t bodyLen) {
     size_t count = 0;
     return parseWaterCommand(body, bodyLen, mask, durations, count);
   }
+  if (body[0] == TYPE_CMD_OTA_PREPARE) return bodyLen == 1;
   return false;
 }
 
@@ -223,6 +226,14 @@ void workerControlTask(void*) {
     }
     if (command.body[0] == TYPE_CMD_WATER) {
       executeWaterCommand(command);
+      continue;
+    }
+    if (command.body[0] == TYPE_CMD_OTA_PREPARE) {
+      LOG("BT worker command execute type=CMD_OTA_PREPARE source=%s id=%08lx%08lx:%lu",
+          source, static_cast<unsigned long>(command.messageId.sessionId >> 32),
+          static_cast<unsigned long>(command.messageId.sessionId & 0xFFFFFFFFULL),
+          static_cast<unsigned long>(command.messageId.sequence));
+      workerOtaOpenWindow(command.sourceMac, 120000);
       continue;
     }
     if (command.body[0] == TYPE_CMD_SLEEP) {
@@ -425,6 +436,7 @@ void btWorkerBegin() {
     LOG("BT worker init failed reason=sender");
     return;
   }
+  workerOtaServiceBegin();
   gCommandQueue = xQueueCreate(COMMAND_QUEUE_LEN, sizeof(WorkerCommand));
   if (!gCommandQueue) {
     LOG("BT worker init failed reason=command_queue");

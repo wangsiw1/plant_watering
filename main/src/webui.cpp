@@ -1,20 +1,28 @@
 #include "WebUI.h"
 #include "config.h"
+#include "ClockManager.h"
 #include "Utility.h"
 #include "Sensor.h"
 #include "Pump.h"
 #include <WebServer.h>
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <StreamUtils.h>
+#include <cctype>
+#include <cstring>
 #include "BluetoothMain.h"
 // extra system headers for diagnostics
 #include <nvs_flash.h>
 #include <nvs.h>
 #include <esp_system.h>
 #include <WiFi.h>
+#include <freertos/semphr.h>
 #include <freertos/timers.h>
 #include "esp_timer.h"
 #include "WateringManager.h"
+#include "OtaManager.h"
+#include "WorkerOtaManager.h"
+#include "generated_web_assets.h"
 
 static WebServer server(80);
 
@@ -22,6 +30,37 @@ static TaskHandle_t sLoopTask = nullptr;
 static TaskHandle_t sWebTask = nullptr;
 static TaskHandle_t sSensorTask = nullptr;
 static TaskHandle_t sWateringTask = nullptr;
+static bool sOtaSawFile = false;
+static bool sOtaAccepted = false;
+static bool sOtaFinished = false;
+static char sOtaRequestError[48] = {};
+static bool sWorkerOtaSawFile = false;
+static bool sWorkerOtaAccepted = false;
+static bool sWorkerOtaFinished = false;
+static char sWorkerOtaRequestError[80] = {};
+static String sJsonResponse;
+
+constexpr size_t JSON_STREAM_BUFFER_SIZE = 512;
+
+static void sendJsonResponse(int statusCode, JsonDocument& doc) {
+  size_t length = measureJson(doc);
+  sJsonResponse.clear();
+  if (!sJsonResponse.reserve(length)) {
+    server.send(500, "text/plain", "JSON_ALLOC_FAILED");
+    return;
+  }
+  serializeJson(doc, sJsonResponse);
+  server.send(statusCode, "application/json", sJsonResponse);
+}
+
+static void sendJsonResponseBuffered(JsonDocument& doc) {
+  server.setContentLength(measureJson(doc));
+  server.send(200, "application/json", "");
+  WiFiClient client = server.client();
+  WriteBufferingStream bufferedClient(client, JSON_STREAM_BUFFER_SIZE);
+  serializeJson(doc, bufferedClient);
+  bufferedClient.flush();
+}
 
 void webSetDiagnosticsTaskHandles(TaskHandle_t loopTask,
                                   TaskHandle_t webTask,
@@ -35,9 +74,85 @@ void webSetDiagnosticsTaskHandles(TaskHandle_t loopTask,
 
 // One-shot timer used to turn the pump off without allocating a task.
 static TimerHandle_t sPumpOffTimer = nullptr;
+static SemaphoreHandle_t sManualPumpMutex = nullptr;
+static bool sManualPumpActive = false;
+static int64_t sManualPumpDeadlineUs = 0;
+
 static void pumpOffTimerCallback(TimerHandle_t xTimer) {
-  (void)xTimer;
+  if (!sManualPumpMutex) return;
+  xSemaphoreTake(sManualPumpMutex, portMAX_DELAY);
+  if (!sManualPumpActive) {
+    xSemaphoreGive(sManualPumpMutex);
+    return;
+  }
+
+  int64_t nowUs = esp_timer_get_time();
+  if (nowUs < sManualPumpDeadlineUs) {
+    uint32_t remainingMs = static_cast<uint32_t>(
+        (sManualPumpDeadlineUs - nowUs + 999) / 1000);
+    TickType_t remainingTicks = pdMS_TO_TICKS(remainingMs);
+    if (remainingTicks == 0) remainingTicks = 1;
+    if (xTimerChangePeriod(xTimer, remainingTicks, 0) == pdPASS) {
+      xSemaphoreGive(sManualPumpMutex);
+      return;
+    }
+  }
+
+  sManualPumpActive = false;
+  sManualPumpDeadlineUs = 0;
   pumpOff();
+  xSemaphoreGive(sManualPumpMutex);
+}
+
+static bool ensureManualPumpResources() {
+  if (!sManualPumpMutex) sManualPumpMutex = xSemaphoreCreateMutex();
+  if (!sManualPumpMutex) return false;
+  if (!sPumpOffTimer) {
+    sPumpOffTimer = xTimerCreate("pumpOff", pdMS_TO_TICKS(10000), pdFALSE,
+                                nullptr, pumpOffTimerCallback);
+  }
+  return sPumpOffTimer != nullptr;
+}
+
+static bool manualPumpIsActive() {
+  if (!sManualPumpMutex) return false;
+  xSemaphoreTake(sManualPumpMutex, portMAX_DELAY);
+  bool active = sManualPumpActive;
+  xSemaphoreGive(sManualPumpMutex);
+  return active;
+}
+
+static void stopManualPump() {
+  if (!sManualPumpMutex) return;
+  xSemaphoreTake(sManualPumpMutex, portMAX_DELAY);
+  bool wasActive = sManualPumpActive;
+  sManualPumpActive = false;
+  sManualPumpDeadlineUs = 0;
+  if (wasActive) pumpOff();
+  xSemaphoreGive(sManualPumpMutex);
+  if (sPumpOffTimer) xTimerStop(sPumpOffTimer, 0);
+}
+
+static bool startManualPump(uint8_t timeoutSeconds) {
+  if (!ensureManualPumpResources()) return false;
+  TickType_t timeoutTicks =
+      pdMS_TO_TICKS(static_cast<uint32_t>(timeoutSeconds) * 1000u);
+  if (timeoutTicks == 0) timeoutTicks = 1;
+
+  xSemaphoreTake(sManualPumpMutex, portMAX_DELAY);
+  sManualPumpDeadlineUs =
+      esp_timer_get_time() + static_cast<int64_t>(timeoutSeconds) * 1000000LL;
+  if (xTimerChangePeriod(sPumpOffTimer, timeoutTicks, 0) != pdPASS) {
+    sManualPumpDeadlineUs = 0;
+    sManualPumpActive = false;
+    pumpOff();
+    xSemaphoreGive(sManualPumpMutex);
+    return false;
+  }
+  sManualPumpActive = true;
+  pumpOn();
+  xSemaphoreGive(sManualPumpMutex);
+  return true;
 }
 
 static const char *stateToString(State currentState) {
@@ -46,861 +161,70 @@ static const char *stateToString(State currentState) {
     case SYNCING: return "SYNCING";
     case WATERING: return "WATERING";
     case SLEEPING: return "SLEEPING";
+    case UPDATING: return "UPDATING";
     default: return "UNKNOWN";
   }
 }
 
-void handleRoot() {
-  const char* html = R"rawliteral(
-  <!doctype html>
-  <html>
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Plant Watering</title>
-    <style>
-      body{font-family:Arial,Helvetica,sans-serif;margin:8px}
-      div{margin-top:6px}
-      button{padding:6px 10px;margin-top:6px; margin-left:6px}
-      table{border-collapse:collapse;width:100%}
-    th,td{border:1px solid #ddd;padding:6px;text-align:left}
-    .field{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px}
-    .field label{flex:0 0 150px}
-    .field input:not([type="checkbox"]){box-sizing:border-box;width:100%;max-width:var(--field-width,240px)}
-    .field.short{--field-width:120px}
-    .field.medium{--field-width:240px}
-    .field.long{--field-width:380px}
-    .field.compact label{flex:0 0 auto}
-    .field-row{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;margin-top:6px}
-    .field-row .field{margin-top:0}
-    .actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
-    .actions button{margin-left:0}
-    .meta{color:#666}
-    /* pot rows are indented to visually separate from worker headers */
-    .pot{margin-left:18px;padding-left:8px;border-left:2px solid #eee;background:#fafafa}
-    @media (max-width:600px){
-      .field{display:block}
-      .field label{display:block;margin-bottom:3px}
-      .field input:not([type="checkbox"]){max-width:none}
-      .field-row{display:block}
-      .field-row .field{margin-top:6px}
-      .pot{margin-left:0}
-    }
-    </style>
-  </head>
-  <body>
-    <h2 id="title">Plant Watering</h2>
-    <h3>Status</h3>
-    <div>Current time (HH:MM): <span id="time">-</span> (<span id="timezone">-</span>)</div>
-    <div>Water tank level: <span id="tank">-</span></div>
-    <div>System status: <span id="status">-</span></div>
-    <div>Auto mode: <span id="auto">-</span></div>
-    <div>Water interval (s): <span id="wint">-</span></div>
-    <div>Data sync interval (s): <span id="dsint">-</span></div>
-    <div>Last data sync cycle: <span id="lastDataSync">-</span></div>
-    <div>Next data sync cycle: <span id="nextDataSync">-</span></div>
-    <div>Last auto watering: <span id="last">-</span></div>
-    <div>
-      <button id="pumpBtn" onclick="togglePump()">Toggle Pump 5s</button>
-    </div>
-
-    <h3>Settings</h3>
-    <div class="field long">
-      <label for="name">Name</label>
-      <input id="name" maxlength="255">
-    </div>
-    <div class="field short">
-      <label for="newTime">Current time (HH:MM)</label>
-      <input id="newTime" type="time">
-    </div>
-    <div class="field medium">
-      <label for="tzOffset">Timezone offset (±HH:MM)</label>
-      <input id="tzOffset" placeholder="+01:00 or -05:30">
-    </div>
-    <div class="field short">
-      <label for="activeStart">Active start (HH:MM)</label>
-      <input id="activeStart" type="time">
-    </div>
-    <div class="field short">
-      <label for="activeEnd">Active end (HH:MM)</label>
-      <input id="activeEnd" type="time">
-    </div>
-    <div class="actions">
-      <button id="syncTimeBtn" onclick="syncTime()">Sync time (NTP)</button>
-      <span id="syncStatus" style="margin-left:8px"></span>
-    </div>
-    <div class="field medium">
-      <label for="newWint">Water interval (s)</label>
-      <input id="newWint" type="number" placeholder="60-2419200(28 days)" min="60" max="2419200">
-    </div>
-    <div class="field medium">
-      <label for="newDsint">Data sync interval (s)</label>
-      <input id="newDsint" type="number" placeholder="60-2419200(28 days)" min="60" max="2419200">
-    </div>
-    <div class="field short">
-      <label for="newAuto">Auto</label>
-      <input id="newAuto" type="checkbox">
-    </div>
-    <div class="actions">
-      <button id="applySettingsBtn" onclick="applySettings()">Apply Settings</button>
-      <span id="settingsStatus" style="margin-left:8px"></span>
-    </div>
-    <div class="actions">
-      <button id="clearWifiBtn" onclick="clearWifiCredConfirm()">Clear WiFi Credentials</button>
-      <button id="clearAllBtn" onclick="clearAllSettingsConfirm()" style="margin-left:8px">Reset All Settings</button>
-      <span id="wifiStatus" style="margin-left:8px"></span>
-      <span id="resetStatus" style="margin-left:8px"></span>
-    </div>
-
-    <h3>Workers</h3>
-    <div>
-      <form id="addForm" onsubmit="return false;">
-          <div class="field medium"><label for="wmac">MAC (hex)</label><input id="wmac" placeholder="AABBCCDDEEFF"></div>
-          <div class="field long"><label for="wname">Name</label><input id="wname" maxlength="64" placeholder="Worker name (64 UTF-8 bytes max)" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji."></div>
-          <!-- Threshold and duration removed from quick add; defaults used -->
-        <div class="actions"><button onclick="addWorker()">Add Worker</button></div>
-      </form>
-    </div>
-    <h3>Worker list</h3>
-    <div style="margin-top:8px">
-      <div class="actions">
-        <button id="applyAllBtn" onclick="applyAll()" disabled>Apply All</button>
-      </div>
-      <div id="workersList">Loading...</div>
-    </div>
-
-    <div id="diagnosticsSection" style="margin-top:18px;">
-      <h3>Diagnostics</h3>
-      <table id="diagTable"><tr><th>Metric</th><th>Value</th></tr></table>
-    </div>
-
-    <script>
-    const dirty = new Set();
-    const pending = new Set();
-    const NAME_MAX_BYTES = 64;
-    const utf8Encoder = new TextEncoder();
-    const urlParams = new URLSearchParams(window.location.search);
-    const debugMode = urlParams.get('debug') === 'true';
-    let autoMode = false;
-    let settingsInputsLoaded = false;
-
-    function clampUtf8Value(value, maxBytes) {
-      if (utf8Encoder.encode(value).length <= maxBytes) return value;
-      let out = '';
-      for (const ch of value) {
-        if (utf8Encoder.encode(out + ch).length > maxBytes) break;
-        out += ch;
-      }
-      return out;
-    }
-
-    function sanitizeNameInput(input) {
-      if (!input) return '';
-      const clamped = clampUtf8Value(input.value || '', NAME_MAX_BYTES);
-      if (input.value !== clamped) input.value = clamped;
-      return clamped;
-    }
-
-    function setWaterButtonBlocked(button, blocked) {
-      if (!button) return;
-      button.dataset.manualBlocked = blocked ? '1' : '0';
-      button.disabled = autoMode || blocked;
-    }
-
-    function updateManualControls() {
-      const pumpBtn = document.getElementById('pumpBtn');
-      if (pumpBtn) pumpBtn.disabled = autoMode;
-      document.querySelectorAll('.waterBtn').forEach(btn => {
-        const blocked = btn.dataset.manualBlocked === '1';
-        btn.disabled = autoMode || blocked;
-      });
-    }
-
-    function markDirty(id) {
-      dirty.add(id);
-      updateButtons();
-    }
-
-    function updateButtons(){
-      document.querySelectorAll('.worker').forEach(wel=>{
-        const mac = wel.dataset.mac;
-        const applyBtn = wel.querySelector('.applyWorkerBtn');
-        const anyDirty = Array.from(dirty).some(id => id.startsWith(mac + '-'));
-        if (applyBtn) applyBtn.disabled = !anyDirty || pending.size > 0;
-      });
-      document.getElementById('applyAllBtn').disabled = dirty.size === 0 || pending.size > 0;
-    }
-
-    // Global status timers and setter so other functions can display transient status messages.
-    const statusTimers = {};
-    function setStatus(id, msg, ok) {
-      // Try pot/node-level status first
-      const nodeEl = document.querySelector(`.node[data-id="${id}"]`);
-      if (nodeEl) {
-        const span = nodeEl.querySelector('.status');
-        if (!span) return;
-        span.innerText = msg || '';
-        span.style.color = ok ? 'green' : 'crimson';
-        if (statusTimers[id]) clearTimeout(statusTimers[id]);
-        if (msg) statusTimers[id] = setTimeout(()=>{ span.innerText=''; delete statusTimers[id]; }, 3000);
-        return;
-      }
-      // Fallback: worker-level status (id like MAC-all)
-      if (typeof id === 'string' && id.endsWith('-all')) {
-        const mac = id.slice(0, -4);
-        const workerDiv = document.querySelector(`.worker[data-mac="${mac}"]`);
-        if (!workerDiv) return;
-        let wstatus = workerDiv.querySelector('.wstatus');
-        if (!wstatus) {
-          wstatus = document.createElement('span');
-          wstatus.className = 'wstatus';
-          wstatus.style.marginLeft = '8px';
-          const headerDiv = workerDiv.querySelector('div');
-          if (headerDiv) headerDiv.appendChild(wstatus);
-        }
-        wstatus.innerText = msg || '';
-        wstatus.style.color = ok ? 'green' : 'crimson';
-        if (statusTimers[id]) clearTimeout(statusTimers[id]);
-        if (msg) statusTimers[id] = setTimeout(()=>{ wstatus.innerText=''; delete statusTimers[id]; }, 3000);
-      }
-    }
-
-    function getNodePayloadEl(el){
-      return {
-        mac: el.dataset.mac,
-        potIndex: parseInt(el.dataset.pi) || 0,
-        name: sanitizeNameInput(el.querySelector('.iname')),
-        threshold: parseInt(el.querySelector('.ith').value) || 2000,
-        duration: parseInt(el.querySelector('.idur').value) || 5
-      };
-    }
-
-    async function applyNode(el){
-      const id = el.dataset.id;
-      if (pending.has(id)) return;
-      pending.add(id); updateButtons();
-      const payload = getNodePayloadEl(el);
-      try {
-        const res = await fetch('/worker/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-        if (!res.ok) throw new Error(await res.text());
-        dirty.delete(id);
-        setStatus(id, 'Saved', true);
-      } catch (e) {
-        console.error('applyNode', id, e);
-        setStatus(id, 'Save failed', false);
-      } finally {
-        pending.delete(id); updateButtons();
-      }
-    }
-
-    async function applyAll(){
-      if (pending.size) return;
-      const ids = Array.from(dirty);
-      if (ids.length===0) return;
-      // apply sequentially to avoid flooding
-      for (let i=0;i<ids.length;i++){
-        if (ids[i].endsWith('-worker')) {
-          const mac = ids[i].slice(0, -7);
-          const wel = document.querySelector(`.worker[data-mac="${mac}"]`);
-          if (wel) await applyWorker(wel);
-        } else {
-          const el = document.querySelector(`.node[data-id="${ids[i]}"]`);
-          if (el) await applyNode(el);
-        }
-      }
-      // refresh list after (full rebuild to capture input changes)
-      setTimeout(refreshWorkersFull,300);
-    }
-
-    async function applyWorker(wel){
-      const mac = wel.dataset.mac;
-      const id = mac + '-worker';
-      if (pending.has(id)) return;
-      pending.add(id); updateButtons();
-      const payload = { mac: mac, workerName: sanitizeNameInput(wel.querySelector('.wname')) };
-      try {
-        const res = await fetch('/worker/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-        if (!res.ok) throw new Error(await res.text());
-        dirty.delete(id);
-        setStatus(mac+'-all', 'Saved', true);
-      } catch (e) {
-        console.error('applyWorker', mac, e);
-        setStatus(mac+'-all', 'Save failed', false);
-      } finally {
-        pending.delete(id); updateButtons();
-      }
-    }
-
-    // Full rebuild of worker list including inputs and event bindings.
-    async function refreshWorkersFull(){
-      let r = await fetch('/nodes');
-      let list = await r.json();
-      let container = document.getElementById('workersList');
-      container.innerHTML = '';
-
-      const workers = list.map(w => ({
-        mac: w.mac,
-        workerName: w.workerName || '',
-        battery: w.battery ?? null,
-        batteryMv: w.batteryMv ?? null,
-        lastSyncAgo: w.lastSyncAgo ?? null,
-        rssi: w.rssi ?? null,
-        nodePotCount: w.nodePotCount,
-        pots: (w.pots || []).map(p => ({ potIndex: (typeof p.index === 'number' ? p.index : 0), name: p.name, threshold: p.threshold, duration: p.duration, soil: p.soil, soilRaw: p.soilRaw ?? null, lastWaterAgo: p.lastWaterAgo ?? null }))
-      }));
-      workers.forEach(w => w.pots.sort((a,b)=> (a.potIndex - b.potIndex)));
-
-      if (workers.length === 0) {
-        container.innerText = 'No workers configured';
-        updateManualControls();
-        updateButtons();
-        return;
-      }
-
-      let idx = 0;
-      for (const worker of workers) {
-        idx++;
-        // worker header
-        const workerDiv = document.createElement('div');
-        workerDiv.className = 'worker';
-        workerDiv.dataset.mac = worker.mac;
-        workerDiv.style.padding = '6px 0';
-        workerDiv.innerHTML = `
-          <hr>
-          <div><strong>${idx}. ${worker.mac}</strong></div>
-          <div class="field long">
-            <label for="workerName-${worker.mac}">Worker name</label>
-            <input id="workerName-${worker.mac}" class="wname" value="${escapeHtml(worker.workerName)}" maxlength="64" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji.">
-          </div>
-          <div class="wmeta meta">${formatBattery(worker)} Last Sync: ${formatRelativeAge(worker.lastSyncAgo)} RSSI: ${worker.rssi===null?'-':(worker.rssi + 'dBm')}</div>
-          <div class="actions">
-            <button class="applyWorkerBtn">Apply</button>
-            <button class="removeAllBtn">Remove</button>
-          </div>
-        `;
-        container.appendChild(workerDiv);
-        // bind apply for this worker (apply all dirty pots for the worker)
-        const applyWorkerBtn = workerDiv.querySelector('.applyWorkerBtn');
-        const workerNameInput = workerDiv.querySelector('.wname');
-        workerNameInput.addEventListener('input', ()=> { sanitizeNameInput(workerNameInput); markDirty(worker.mac + '-worker'); });
-        applyWorkerBtn.addEventListener('click', async ()=>{
-          if (pending.size) return;
-          if (dirty.has(worker.mac + '-worker')) await applyWorker(workerDiv);
-          const nodes = workerDiv.querySelectorAll('.node');
-          for (let i=0;i<nodes.length;i++){
-            const el = nodes[i];
-            if (dirty.has(el.dataset.id)) await applyNode(el);
-          }
-          setTimeout(refreshWorkersFull,300);
-        });
-        // bind remove all
-        const removeAllBtn = workerDiv.querySelector('.removeAllBtn');
-        removeAllBtn.addEventListener('click', async ()=> {
-          setStatus(worker.mac+'-all', 'Removing...', false);
-          const ok = await removeWorker(worker.mac);
-          if (ok) { setStatus(worker.mac+'-all', 'Removed', true); setTimeout(refreshWorkersFull,300); } else setStatus(worker.mac+'-all', 'Remove failed', false);
-        });
-
-        // render pots (ordered by potIndex)
-        if (!worker.pots || worker.pots.length === 0) {
-          const p = document.createElement('div');
-          p.innerText = 'No pots configured/synced yet';
-          workerDiv.appendChild(p);
-        } else {
-          for (let pi=0; pi<worker.pots.length; ++pi) {
-            const pot = worker.pots[pi];
-            const div = document.createElement('div');
-            div.className = 'node pot';
-            div.dataset.mac = worker.mac;
-            div.dataset.pi = (pot.potIndex===undefined?0:pot.potIndex);
-            const id = worker.mac + '-' + div.dataset.pi;
-            div.dataset.id = id;
-            div.style.padding = '6px 6px';
-            div.innerHTML = `
-              <div><strong>Pot ${pot.potIndex+1}</strong></div>
-              <div class="field-row">
-                <div class="field long compact">
-                  <label for="potName-${id}">Name</label>
-                  <input id="potName-${id}" class="iname" value="${escapeHtml(pot.name||'')}" maxlength="64" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji.">
-                </div>
-                <div class="field short compact">
-                  <label for="potThreshold-${id}">Threshold</label>
-                  <input id="potThreshold-${id}" class="ith" type="number" value="${pot.threshold}" min="0" max="4095">
-                </div>
-                <div class="field short compact">
-                  <label for="potDuration-${id}">Duration(s)</label>
-                  <input id="potDuration-${id}" class="idur" type="number" value="${pot.duration}" min="1" max="60">
-                </div>
-              </div>
-                <div class="meta">
-                  <span class="soil">${formatSoil(pot)}</span>
-                  <span class="lastwater" style="margin-left:8px">Last Water: ${formatRelativeAge(pot.lastWaterAgo)}</span>
-                </div>
-                <div class="actions">
-                  <button class="waterBtn" disabled>Water</button>
-                  <span class="status" style="margin-left:8px"></span>
-                </div>
-            `;
-            const iname = div.querySelector('.iname');
-            const ith = div.querySelector('.ith');
-            const idur = div.querySelector('.idur');
-            iname.addEventListener('input', ()=> { sanitizeNameInput(iname); markDirty(id); });
-            ith.addEventListener('input', ()=> markDirty(id));
-            idur.addEventListener('input', ()=> markDirty(id));
-            const waterBtn = div.querySelector('.waterBtn');
-            // display sensor status and disable water button if sensor not connected or worker not synced
-            const soilSpan = div.querySelector('.soil');
-            const lastSpan = div.querySelector('.lastwater');
-            const synced = worker.lastSyncAgo != null;
-            if (isSoilDisconnected(pot)) {
-              soilSpan.innerText = formatSoil(pot);
-              setWaterButtonBlocked(waterBtn, true);
-            } else {
-              soilSpan.innerText = formatSoil(pot);
-              setWaterButtonBlocked(waterBtn, !synced);
-            }
-            if (lastSpan) lastSpan.innerText = 'Last Water: ' + formatRelativeAge(pot.lastWaterAgo);
-            waterBtn.addEventListener('click', async ()=> { setStatus(id, 'Sending...', false); const dur = parseInt(idur.value) || pot.duration; const ok = await waterWorker(div.dataset.mac, parseInt(div.dataset.pi), dur); if (ok) setStatus(id, 'Water sent', true); else setStatus(id, 'Send failed', false); });
-            workerDiv.appendChild(div);
-          }
-        }
-      }
-      updateManualControls();
-      updateButtons();
-    }
-
-    // Partial refresh: only update non-input information (battery, last sync, rssi, soil, last water)
-    async function refreshWorkersPartial(){
-      try {
-        let r = await fetch('/nodes');
-        let list = await r.json();
-        // Group by MAC like full
-        const workers = list.map(w => ({
-          mac: w.mac,
-          battery: w.battery ?? null,
-          batteryMv: w.batteryMv ?? null,
-          lastSyncAgo: w.lastSyncAgo ?? null,
-          rssi: w.rssi ?? null,
-          pots: (w.pots || []).map(p => ({ potIndex: (typeof p.index === 'number' ? p.index : 0), soil: p.soil, soilRaw: p.soilRaw ?? null, lastWaterAgo: p.lastWaterAgo ?? null }))
-        }));
-        workers.forEach(w => w.pots.sort((a,b)=> (a.potIndex - b.potIndex)));
-
-        for (const worker of workers) {
-          const workerDiv = document.querySelector(`.worker[data-mac="${worker.mac}"]`);
-          if (!workerDiv) continue; // skip workers not present in DOM (added/removed -> full refresh will handle)
-          // update header meta
-          const winfo = workerDiv.querySelector('.wmeta');
-          if (winfo) {
-            winfo.innerText = `${formatBattery(worker)} Last Sync: ${formatRelativeAge(worker.lastSyncAgo)} RSSI: ${worker.rssi===null?'-':(worker.rssi + 'dBm')}`;
-          }
-          // update pots
-          for (let pi=0; pi<worker.pots.length; ++pi) {
-            const pot = worker.pots[pi];
-            const node = workerDiv.querySelector(`.node[data-pi="${pot.potIndex}"]`);
-            if (!node) continue;
-            const soilSpan = node.querySelector('.soil');
-            const lastSpan = node.querySelector('.lastwater');
-            const waterBtn = node.querySelector('.waterBtn');
-            const synced = worker.lastSyncAgo != null;
-            if (soilSpan) {
-              soilSpan.innerText = formatSoil(pot);
-            }
-            if (lastSpan) lastSpan.innerText = 'Last Water: ' + formatRelativeAge(pot.lastWaterAgo);
-            setWaterButtonBlocked(waterBtn, (isSoilDisconnected(pot) || !synced));
-          }
-        }
-        updateManualControls();
-        updateButtons();
-      } catch (e) { console.error('refreshWorkersPartial', e); }
-    }
-
-    function escapeHtml(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-    function finiteNumber(value) {
-      return typeof value === 'number' && Number.isFinite(value);
-    }
-
-    function formatBattery(worker) {
-      if (!worker || !finiteNumber(worker.battery)) return 'Battery: -';
-      let text = 'Battery: ' + worker.battery + '%';
-      if (debugMode && finiteNumber(worker.batteryMv)) text += ' (' + worker.batteryMv + ' mV)';
-      return text;
-    }
-
-    function isSoilDisconnected(pot) {
-      return pot && finiteNumber(pot.soilRaw) && pot.soilRaw < 50;
-    }
-
-    function formatSoil(pot) {
-      if (isSoilDisconnected(pot)) {
-        let text = 'Soil Moisture: Sensor not connected';
-        if (debugMode && finiteNumber(pot.soilRaw)) text += ' (raw ' + pot.soilRaw + ')';
-        return text;
-      }
-      let text = 'Soil Moisture: ' + (pot && finiteNumber(pot.soil) ? pot.soil : '-');
-      if (debugMode && pot && finiteNumber(pot.soilRaw)) text += ' (raw ' + pot.soilRaw + ')';
-      return text;
-    }
-
-    function formatRelativeAge(ageSeconds){
-      if (typeof ageSeconds !== 'number' || !Number.isFinite(ageSeconds) || ageSeconds < 0) return '-';
-      const seconds = Math.floor(ageSeconds);
-      let value;
-      let unit;
-      if (seconds < 60) {
-        value = seconds;
-        unit = 'second';
-      } else if (seconds < 3600) {
-        value = Math.floor(seconds / 60);
-        unit = 'minute';
-      } else if (seconds < 86400) {
-        value = Math.floor(seconds / 3600);
-        unit = 'hour';
-      } else {
-        value = Math.floor(seconds / 86400);
-        unit = 'day';
-      }
-      return value + ' ' + unit + (value === 1 ? '' : 's') + ' ago';
-    }
-
-    function formatRelativeFuture(secondsUntil){
-      if (typeof secondsUntil !== 'number' || !Number.isFinite(secondsUntil) || secondsUntil < 0) return '-';
-      const seconds = Math.floor(secondsUntil);
-      let value;
-      let unit;
-      if (seconds < 60) {
-        value = seconds;
-        unit = 'second';
-      } else if (seconds < 3600) {
-        value = Math.floor(seconds / 60);
-        unit = 'minute';
-      } else if (seconds < 86400) {
-        value = Math.floor(seconds / 3600);
-        unit = 'hour';
-      } else {
-        value = Math.floor(seconds / 86400);
-        unit = 'day';
-      }
-      return 'in ' + value + ' ' + unit + (value === 1 ? '' : 's');
-    }
-
-    async function addWorker(){
-      const mac = document.getElementById('wmac').value.trim();
-      const name = sanitizeNameInput(document.getElementById('wname'));
-      const body = {mac:mac, workerName:name};
-      await fetch('/worker/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-      setTimeout(refreshWorkersFull,300);
-    }
-
-    async function removeWorker(mac, potIndex){
-      try {
-        const body = {mac:mac};
-        const res = await fetch('/worker/remove',{method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-        const ok = res.ok;
-        if (ok) setTimeout(refreshWorkersFull,300);
-        return ok;
-      } catch (e) { return false; }
-    }
-
-    async function waterWorker(mac, potIndex, duration){
-      try {
-        const body = {mac:mac, duration:duration}; if (typeof potIndex !== 'undefined') body.potIndex = potIndex;
-        const res = await fetch('/worker/water',{method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-        return res.ok;
-      } catch (e) { return false; }
-    }
-
-    async function togglePump(){
-      await fetch('/pump/toggle', {method:'POST'});
-    }
-
-    async function applySettings(){
-      const btn = document.getElementById('applySettingsBtn');
-      const status = document.getElementById('settingsStatus');
-      const timeVal = (document.getElementById('newTime').value || '').trim();
-      const tzVal = (document.getElementById('tzOffset').value || '').trim();
-      const body = {
-        name:document.getElementById('name').value,
-        auto:document.getElementById('newAuto').checked,
-        wint:parseInt(document.getElementById('newWint').value),
-        dsint:parseInt(document.getElementById('newDsint').value)
-      };
-      if (timeVal) body.newTime = timeVal;
-      if (tzVal) body.tzOffset = tzVal;
-      // active window inputs (HH:MM -> seconds since midnight)
-      const aStart = (document.getElementById('activeStart') || {}).value || '';
-      const aEnd = (document.getElementById('activeEnd') || {}).value || '';
-      if (aStart) {
-        const parts = aStart.split(':'); if (parts.length === 2) body.activeStart = parseInt(parts[0])*3600 + parseInt(parts[1])*60;
-      }
-      if (aEnd) {
-        const parts = aEnd.split(':'); if (parts.length === 2) body.activeEnd = parseInt(parts[0])*3600 + parseInt(parts[1])*60;
-      }
-      try {
-        btn.disabled = true;
-        status.innerText = 'Saving...'; status.style.color = 'gray';
-        const res = await fetch('/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-        if (!res.ok) throw new Error(await res.text());
-        status.innerText = 'Saved'; status.style.color = 'green';
-        settingsInputsLoaded = false;
-        setTimeout(fetchStatus,300);
-      } catch (e) {
-        status.innerText = 'Save failed'; status.style.color = 'crimson';
-      } finally {
-        btn.disabled = false;
-        setTimeout(()=>{ status.innerText = ''; }, 3000);
-      }
-    }
-
-    async function syncTime(){
-      const btn = document.getElementById('syncTimeBtn');
-      const status = document.getElementById('syncStatus');
-      if (!btn || !status) return;
-      btn.disabled = true; status.innerText = 'Syncing...'; status.style.color = 'gray';
-      try {
-        const res = await fetch('/time/sync', {method:'POST'});
-        const j = await res.json();
-        if (!res.ok || !j.ok) throw new Error(JSON.stringify(j));
-        status.innerText = 'Synced'; status.style.color = 'green';
-        setTimeout(fetchStatus, 300);
-      } catch (e) {
-        status.innerText = 'Sync failed'; status.style.color = 'crimson';
-      } finally {
-        btn.disabled = false; setTimeout(()=>{ status.innerText=''; }, 3000);
-      }
-    }
-
-    async function clearWifiCredConfirm() {
-      const confirmed = confirm("Are you sure you want to clear saved WiFi credentials? This action cannot be undone.");
-      if (!confirmed) return;
-      
-      const btn = document.getElementById('clearWifiBtn');
-      const status = document.getElementById('wifiStatus');
-      btn.disabled = true;
-      status.innerText = 'Clearing...'; status.style.color = 'gray';
-      
-      try {
-        const res = await fetch('/wifi/clear', {method:'POST'});
-        if (!res.ok) throw new Error(await res.text());
-        status.innerText = 'Cleared'; status.style.color = 'green';
-        setTimeout(fetchStatus, 300);
-      } catch (e) {
-        status.innerText = 'Clear failed'; status.style.color = 'crimson';
-      } finally {
-        btn.disabled = false;
-        setTimeout(()=>{ status.innerText = ''; }, 3000);
-      }
-    }
-    
-    async function clearAllSettingsConfirm() {
-      const confirmed = confirm("Are you sure you want to reset all settings and remove all workers? This action cannot be undone.");
-      if (!confirmed) return;
-      const btn = document.getElementById('clearAllBtn');
-      const status = document.getElementById('resetStatus');
-      btn.disabled = true;
-      status.innerText = 'Resetting...'; status.style.color = 'gray';
-      try {
-        const res = await fetch('/settings/clear_all', {method:'POST'});
-        if (!res.ok) throw new Error(await res.text());
-        status.innerText = 'Reset'; status.style.color = 'green';
-        setTimeout(fetchStatus, 300);
-        setTimeout(refreshWorkersFull, 300);
-      } catch (e) {
-        status.innerText = 'Reset failed'; status.style.color = 'crimson';
-      } finally {
-        btn.disabled = false; setTimeout(()=>{ status.innerText=''; }, 3000);
-      }
-    }
-      
-    // render diagnostics table (located at page bottom)
-    function renderDiagnostics(j){
-      const tbl = document.getElementById('diagTable');
-      if (!tbl) return;
-      function fmt(n){ if (n===null || n===undefined) return '-'; return n; }
-      function fmtKb(n){ if (n===null || n===undefined) return '-'; return parseFloat((n/1024).toFixed(2)); }
-      tbl.innerHTML = `
-        <tr><th>Metric</th><th>Value</th></tr>
-        <tr><td>Free Heap (KiB)</td><td>${fmtKb(j.freeHeap)}</td></tr>
-        <tr><td>Minimum Free Heap (KiB)</td><td>${fmtKb(j.minFreeHeap)}</td></tr>
-        <tr><td>Largest Free Block (KiB)</td><td>${fmtKb(j.largestFreeBlock)}</td></tr>
-        <tr><td>Total Heap (KiB)</td><td>${fmtKb(j.heapSize)}</td></tr>
-        <tr><td>Loop Stack Minimum Free (bytes)</td><td>${fmt(j.loopStackMinFree)}</td></tr>
-        <tr><td>Web Stack Minimum Free (bytes)</td><td>${fmt(j.webStackMinFree)}</td></tr>
-        <tr><td>Sensor Stack Minimum Free (bytes)</td><td>${fmt(j.sensorStackMinFree)}</td></tr>
-        <tr><td>Watering Stack Minimum Free (bytes)</td><td>${fmt(j.wateringStackMinFree)}</td></tr>
-        <tr><td>Bluetooth TX Stack Minimum Free (bytes)</td><td>${fmt(j.btSenderStackMinFree)}</td></tr>
-        <tr><td>Free Sketch Space (KiB)</td><td>${fmtKb(j.freeSketchSpace)}</td></tr>
-        <tr><td>Sketch Size (KiB)</td><td>${fmtKb(j.sketchSize)}</td></tr>
-        <tr><td>Flash Chip Size (KiB)</td><td>${fmtKb(j.flashChipSize)}</td></tr>
-        <tr><td>Chip Revision</td><td>${fmt(j.chipRevision)}</td></tr>
-        <tr><td>NVS used entries</td><td>${fmt(j.nvs_entries)}</td></tr>
-        <tr><td>NVS total entries</td><td>${fmt(j.nvs_total_entries)}</td></tr>
-        <tr><td>WiFi RSSI (dBm)</td><td>${fmt(j.rssi)}</td></tr>
-      `;
-    }
-
-    async function fetchDiagnostics(){
-      if (!debugMode) return;
-      try {
-        const r = await fetch('/diagnostics');
-        const j = await r.json();
-        renderDiagnostics(j);
-      } catch (e) {
-        console.error('fetchDiagnostics', e);
-      }
-    }
-
-    async function fetchStatus(){
-      try {
-        let r = await fetch('/status');
-        let j = await r.json();
-        const tankEl = document.getElementById('tank');
-        if (tankEl) {
-          let ttext = '-';
-          if (typeof j.tank === 'number') {
-            const v = j.tank;
-            if (v < 10) ttext = 'Low';
-            else if (v > 2800) ttext = 'High';
-            else ttext = 'Not Connected';
-          }
-          tankEl.innerText = ttext;
-        }
-
-        if (j.clockValid && typeof j.timeOfDaySec === 'number') {
-          const hh = Math.floor(j.timeOfDaySec/3600)%24;
-          const mm = Math.floor((j.timeOfDaySec%3600)/60);
-          const s = String(hh).padStart(2,'0')+':' + String(mm).padStart(2,'0');
-          const timeSpan = document.getElementById('time');
-          if (timeSpan) timeSpan.innerText = s;
-        } else {
-          const timeSpan = document.getElementById('time');
-          if (timeSpan) timeSpan.innerText = 'Invalid';
-        }
-
-        const autoSpan = document.getElementById('auto');
-        autoMode = !!j.auto;
-        if (autoSpan) autoSpan.innerText = autoMode ? "On" : "Off";
-
-        const wintSpan = document.getElementById('wint');
-        if (wintSpan) wintSpan.innerText = j.waterInterval || 3600;
-        const dsintSpan = document.getElementById('dsint');
-        if (dsintSpan) dsintSpan.innerText = j.dataSyncInterval || 3600;
-        const lastDataSyncSpan = document.getElementById('lastDataSync');
-        if (lastDataSyncSpan) lastDataSyncSpan.innerText = formatRelativeAge(j.lastDataSyncAgo);
-        const nextDataSyncSpan = document.getElementById('nextDataSync');
-        if (nextDataSyncSpan) nextDataSyncSpan.innerText = formatRelativeFuture(j.nextDataSyncIn);
-        const statusSpan = document.getElementById('status');
-        if (statusSpan) statusSpan.innerText = j.state || '-';
-        const lastSpan = document.getElementById('last');
-        if (lastSpan) lastSpan.innerText = formatRelativeAge(j.lastAutoWateringAgo);
-
-        const title = document.getElementById('title');
-        if (title) title.innerText = 'Plant Watering ' + (j.name?('(' + j.name + ')'):"" );
-
-        // populate timezone display every refresh, but editable settings inputs only on page load
-        try {
-          if (typeof j.tzOffsetMinutes === 'number') {
-            const tzSpan = document.getElementById('timezone');
-            if (tzSpan) {
-              const mins = j.tzOffsetMinutes;
-              const sign = mins < 0 ? '-' : '+';
-              const am = Math.abs(mins);
-              const hh = Math.floor(am/60).toString().padStart(2,'0');
-              const mm = (am%60).toString().padStart(2,'0');
-              tzSpan.innerText = sign + hh + ':' + mm;
-            }
-          }
-          if (!settingsInputsLoaded) populateSettingsInputs(j);
-        } catch(e) {}
-
-        updateManualControls();
-      } catch (e) {
-        console.error('fetchStatus', e);
-      }
-    }
-
-    function formatTimeInput(secondsOfDay){
-      const s = secondsOfDay || 0;
-      const hh = Math.floor(s/3600)%24;
-      const mm = Math.floor((s%3600)/60);
-      return String(hh).padStart(2,'0')+':' + String(mm).padStart(2,'0');
-    }
-
-    function populateSettingsInputs(j){
-      const nameInput = document.getElementById('name');
-      if (nameInput) nameInput.value = j.name || '';
-      const autoInput = document.getElementById('newAuto');
-      if (autoInput) autoInput.checked = !!j.auto;
-      if (typeof j.activeStart === 'number') {
-        const el = document.getElementById('activeStart');
-        if (el) el.value = formatTimeInput(j.activeStart);
-      }
-      if (typeof j.activeEnd === 'number') {
-        const el = document.getElementById('activeEnd');
-        if (el) el.value = formatTimeInput(j.activeEnd);
-      }
-      if (typeof j.waterInterval === 'number') {
-        const el = document.getElementById('newWint');
-        if (el) el.value = j.waterInterval;
-      }
-      if (typeof j.dataSyncInterval === 'number') {
-        const el = document.getElementById('newDsint');
-        if (el) el.value = j.dataSyncInterval;
-      }
-      settingsInputsLoaded = true;
-    }
-
-    // Poll less frequently to reduce CPU/network and avoid clobbering user inputs
-    const diagnosticsSection = document.getElementById('diagnosticsSection');
-    if (diagnosticsSection) diagnosticsSection.style.display = debugMode ? '' : 'none';
-    const addWorkerNameInput = document.getElementById('wname');
-    if (addWorkerNameInput) addWorkerNameInput.addEventListener('input', ()=> sanitizeNameInput(addWorkerNameInput));
-    setInterval(fetchStatus,3000);
-    setInterval(refreshWorkersPartial,5000);
-    fetchStatus();
-    if (debugMode) {
-      setInterval(fetchDiagnostics,10000);
-      fetchDiagnostics();
-    }
-    // initial full worker list render
-    refreshWorkersFull();
-    </script>
-  </body>
-  </html>
-  )rawliteral";
-  
-  // strlen on a string literal: computed once, cached.
-  // Even better: declare html as const char html[] = R"(...)" 
-  // and use sizeof(html)-1 for a compile-time constant.
-  static const size_t htmlLen = strlen(html);
-
-  // Send headers only — setContentLength ensures the correct
-  // Content-Length header is written despite the empty body string.
-  server.setContentLength(htmlLen);
-  server.send(200, "text/html", ""); // headers sent, zero body bytes
-
-  // Write body directly to TCP socket in MTU-sized chunks.
-  // WiFiClient::write(const uint8_t*, size_t) has no String conversion.
-  WiFiClient client = server.client();
-  const uint8_t* data = (const uint8_t*)html;
-  size_t remaining = htmlLen;
-  while (remaining > 0) {
-      size_t chunk = min(remaining, (size_t)1460); // ~1 TCP segment (MTU - headers)
-      size_t written = client.write(data, chunk);
-      if (written == 0) break; // client disconnected mid-transfer
-      data += written;
-      remaining -= written;
+static bool isValidWebName(const char* value) {
+  if (!value) return false;
+  char checked[UTF8_NAME_STORAGE_BYTES];
+  copyUtf8Truncated(value, checked, sizeof(checked));
+  if (strcmp(value, checked) != 0) return false;
+  for (const unsigned char* p = reinterpret_cast<const unsigned char*>(value);
+       *p; ++p) {
+    if (*p < 0x20 || *p == 0x7f) return false;
+    if (*p == 0xc2 && p[1] >= 0x80 && p[1] <= 0x9f) return false;
   }
+  return true;
+}
+
+static void setOtaRequestError(const char* error) {
+  if (!error) error = "update_failed";
+  strncpy(sOtaRequestError, error, sizeof(sOtaRequestError) - 1);
+  sOtaRequestError[sizeof(sOtaRequestError) - 1] = '\0';
+}
+
+static void setWorkerOtaRequestError(const char* error) {
+  if (!error) error = "worker_update_failed";
+  strncpy(sWorkerOtaRequestError, error, sizeof(sWorkerOtaRequestError) - 1);
+  sWorkerOtaRequestError[sizeof(sWorkerOtaRequestError) - 1] = '\0';
+}
+
+static void sendHtmlDocument(const uint8_t* html, size_t length) {
+  server.sendHeader("Content-Encoding", "gzip");
+  server.sendHeader("Vary", "Accept-Encoding");
+  server.sendHeader("Cache-Control", "no-store");
+  server.setContentLength(length);
+  server.send(200, "text/html; charset=utf-8", "");
+  WiFiClient client = server.client();
+  while (length > 0) {
+    size_t chunk = min(length, static_cast<size_t>(1460));
+    size_t written = client.write(html, chunk);
+    if (written == 0) break;
+    html += written;
+    length -= written;
+  }
+}
+
+void handleRoot() {
+  sendHtmlDocument(ROOT_HTML_GZ, ROOT_HTML_GZ_LEN);
+}
+
+void handleOtaPage() {
+  sendHtmlDocument(OTA_HTML_GZ, OTA_HTML_GZ_LEN);
 }
 
 void handleStatus() {
   int tank = getTankLevel();
   unsigned long now = millis()/1000;
-  uint32_t tod = getCurrentTimeOfDaySec();
+  uint32_t tod = clockGetCurrentTimeOfDaySec();
   Settings settings{};
   RuntimeSnapshot runtime{};
+  ClockStatusSnapshot clock{};
   getSettingsSnapshot(settings);
   getRuntimeSnapshot(runtime);
+  clockGetStatus(clock);
   JsonDocument doc;
   doc["name"] = settings.name;
   doc["auto"] = runtime.autoEnabled;
@@ -909,11 +233,20 @@ void handleStatus() {
   doc["timeOfDaySec"] = tod;
   doc["waterInterval"] = settings.waterInterval;
   doc["dataSyncInterval"] = settings.dataSyncInterval;
+  doc["pumpDelay"] = settings.pumpDelaySeconds;
+  doc["manualPumpTimeout"] = settings.manualPumpTimeoutSeconds;
+  doc["manualPumpActive"] = manualPumpIsActive();
   doc["tzOffsetMinutes"] = settings.tzOffsetMinutes;
   doc["activeStart"] = settings.activeStart;
   doc["activeEnd"] = settings.activeEnd;
+  doc["workerCount"] = getWorkerConfigCount();
+  doc["maxWorkerCount"] = MAX_WORKER_COUNT;
   doc["state"] = stateToString(runtime.state);
-  doc["clockValid"] = isClockValid();
+  doc["clockValid"] = clock.valid;
+  doc["clockSource"] = clockSourceName(clock.source);
+  doc["clockSyncPending"] = clock.ntpSyncPending;
+  if (clock.ntpSyncError[0]) doc["clockSyncError"] = clock.ntpSyncError;
+  else doc["clockSyncError"] = nullptr;
   int64_t nowUs = esp_timer_get_time();
   if (runtime.autoEnabled && runtime.lastDataSyncUs != 0 &&
       nowUs >= runtime.lastDataSyncUs) {
@@ -929,7 +262,7 @@ void handleStatus() {
   } else {
     doc["nextDataSyncIn"] = nullptr;
   }
-  uint64_t curEpoch = getCurrentEpochSec();
+  uint64_t curEpoch = clockGetCurrentEpochSec();
   if (curEpoch) doc["epoch"] = curEpoch;
   if (settings.lastWateringUtcSec != 0 &&
       curEpoch >= settings.lastWateringUtcSec) {
@@ -938,10 +271,7 @@ void handleStatus() {
     doc["lastAutoWateringAgo"] = nullptr;
   }
 
-  server.setContentLength(measureJson(doc));
-  server.send(200, "application/json", "");
-  WiFiClient client = server.client();
-  serializeJson(doc, client); // Streams directly to the network buffer
+  sendJsonResponse(200, doc);
 }
 
 void handleDiagnostics() {
@@ -990,45 +320,44 @@ void handleDiagnostics() {
   if (WiFi.status() == WL_CONNECTED) doc["rssi"] = WiFi.RSSI();
   else doc["rssi"] = nullptr;
 
-  server.setContentLength(measureJson(doc));
-  server.send(200, "application/json", "");
-  WiFiClient client = server.client();
-  serializeJson(doc, client); // Streams directly to the network buffer
+  sendJsonResponse(200, doc);
 }
 
 void handleTimeSync() {
   if (server.method() != HTTP_POST) { server.send(405); return; }
-  bool ok = trySyncNTP(10000);
   JsonDocument doc;
-  doc["ok"] = ok;
-  if (ok) {
-    uint64_t epoch = getCurrentEpochSec();
-    Settings settings{};
-    getSettingsSnapshot(settings);
-    doc["epoch"] = epoch;
-    doc["tzOffsetMinutes"] = settings.tzOffsetMinutes;
-    String out; serializeJson(doc, out);
-    server.send(200, "application/json", out);
-  } else {
-    doc["error"] = "NTP sync failed";
-    String out; serializeJson(doc, out);
-    server.send(500, "application/json", out);
+  if (WiFi.status() != WL_CONNECTED) {
+    doc["ok"] = false;
+    doc["error"] = "WIFI_DISCONNECTED";
+    sendJsonResponse(503, doc);
+    return;
   }
+  bool accepted = clockRequestNtpSync();
+  doc["ok"] = accepted;
+  doc["pending"] = accepted;
+  if (!accepted) doc["error"] = "WIFI_DISCONNECTED";
+  sendJsonResponse(accepted ? 202 : 503, doc);
 }
 
 void handlePumpToggle() {
+  if (manualPumpIsActive()) {
+    stopManualPump();
+    server.send(200, "text/plain", "OK");
+    return;
+  }
+  if (otaIsActive() || workerOtaIsActive()) {
+    server.send(409, "text/plain", "OTA_ACTIVE");
+    return;
+  }
   if (getAutoEnabled()) {
     server.send(409, "text/plain", "AUTO_MODE");
     return;
   }
-  pumpOn();
-  // reset/start one-shot timer to turn pump off after delay
-  if (sPumpOffTimer) {
-    xTimerReset(sPumpOffTimer, 0);
-  } else {
-    // fallback: create and start timer if not yet created
-    sPumpOffTimer = xTimerCreate("pumpOff", pdMS_TO_TICKS(5000), pdFALSE, NULL, pumpOffTimerCallback);
-    if (sPumpOffTimer) xTimerStart(sPumpOffTimer, 0);
+  Settings settings{};
+  getSettingsSnapshot(settings);
+  if (!startManualPump(settings.manualPumpTimeoutSeconds)) {
+    server.send(503, "text/plain", "PUMP_TIMER_FAILED");
+    return;
   }
   server.send(200, "text/plain", "OK");
 }
@@ -1038,7 +367,7 @@ void handleSettings() {
   String body = server.arg("plain");
   if (body.isEmpty()) { server.send(400, "text/plain", "EMPTY"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, body)) {
+  if (deserializeJson(doc, body) || !doc.is<JsonObject>()) {
     server.send(400, "text/plain", "BAD_JSON");
     return;
   }
@@ -1049,21 +378,57 @@ void handleSettings() {
   bool newAuto = oldAuto;
   bool hasManualTime = false;
   uint32_t manualTimeSec = 0;
-  if (doc["name"].is<const char*>())
+  if (!doc["name"].isNull()) {
+    if (!doc["name"].is<const char*>() ||
+        !isValidWebName(doc["name"].as<const char*>())) {
+      server.send(400, "text/plain", "BAD_NAME");
+      return;
+    }
     copyUtf8Truncated(doc["name"].as<const char*>(), next.name, sizeof(next.name));
-  if (doc["auto"].is<bool>()) newAuto = doc["auto"].as<bool>();
-  if (doc["wint"].is<uint32_t>()) next.waterInterval = doc["wint"].as<uint32_t>();
-  if (doc["dsint"].is<uint32_t>()) next.dataSyncInterval = doc["dsint"].as<uint32_t>();
-  if (doc["activeStart"].is<uint32_t>()) next.activeStart = doc["activeStart"].as<uint32_t>();
-  if (doc["activeEnd"].is<uint32_t>()) next.activeEnd = doc["activeEnd"].as<uint32_t>();
-  if (doc["newTime"].is<const char*>()) {
+  }
+  if (!doc["auto"].isNull()) {
+    if (!doc["auto"].is<bool>()) { server.send(400, "text/plain", "BAD_AUTO"); return; }
+    newAuto = doc["auto"].as<bool>();
+  }
+  if (!doc["wint"].isNull()) {
+    if (!doc["wint"].is<uint32_t>()) { server.send(400, "text/plain", "BAD_WATER_INTERVAL"); return; }
+    next.waterInterval = doc["wint"].as<uint32_t>();
+  }
+  if (!doc["dsint"].isNull()) {
+    if (!doc["dsint"].is<uint32_t>()) { server.send(400, "text/plain", "BAD_SYNC_INTERVAL"); return; }
+    next.dataSyncInterval = doc["dsint"].as<uint32_t>();
+  }
+  if (!doc["pumpDelay"].isNull()) {
+    if (!doc["pumpDelay"].is<uint32_t>()) { server.send(400, "text/plain", "BAD_PUMP_DELAY"); return; }
+    uint32_t value = doc["pumpDelay"].as<uint32_t>();
+    if (value > 30) { server.send(400, "text/plain", "BAD_PUMP_DELAY"); return; }
+    next.pumpDelaySeconds = static_cast<uint8_t>(value);
+  }
+  if (!doc["manualPumpTimeout"].isNull()) {
+    if (!doc["manualPumpTimeout"].is<uint32_t>()) { server.send(400, "text/plain", "BAD_MANUAL_PUMP_TIMEOUT"); return; }
+    uint32_t value = doc["manualPumpTimeout"].as<uint32_t>();
+    if (value < 1 || value > 60) { server.send(400, "text/plain", "BAD_MANUAL_PUMP_TIMEOUT"); return; }
+    next.manualPumpTimeoutSeconds = static_cast<uint8_t>(value);
+  }
+  if (!doc["activeStart"].isNull()) {
+    if (!doc["activeStart"].is<uint32_t>()) { server.send(400, "text/plain", "BAD_ACTIVE_START"); return; }
+    next.activeStart = doc["activeStart"].as<uint32_t>();
+  }
+  if (!doc["activeEnd"].isNull()) {
+    if (!doc["activeEnd"].is<uint32_t>()) { server.send(400, "text/plain", "BAD_ACTIVE_END"); return; }
+    next.activeEnd = doc["activeEnd"].as<uint32_t>();
+  }
+  if (!doc["newTime"].isNull()) {
+    if (!doc["newTime"].is<const char*>()) {
+      server.send(400, "text/plain", "BAD_TIME");
+      return;
+    }
     const char* value = doc["newTime"];
     int hours = 0;
     int minutes = 0;
     char trailing = '\0';
     if (!value || sscanf(value, "%d:%d%c", &hours, &minutes, &trailing) != 2 ||
-        hours < 0 || hours > 23 || minutes < 0 || minutes > 59 ||
-        (getCurrentEpochSec() == 0 && next.savedUtcSec == 0)) {
+        hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
       server.send(400, "text/plain", "BAD_TIME");
       return;
     }
@@ -1091,19 +456,22 @@ void handleSettings() {
     }
     int sign = value[0] == '-' ? -1 : 1;
     next.tzOffsetMinutes = sign * (hours * 60 + minutes);
+  } else if (!doc["tzOffsetMinutes"].isNull() || !doc["tzOffset"].isNull()) {
+    server.send(400, "text/plain", "BAD_TIMEZONE");
+    return;
   }
 
   if (!applySettingsSnapshot(next)) {
     server.send(400, "text/plain", "BAD_SETTINGS");
     return;
   }
-  setAutoEnabled(newAuto);
   if (newAuto && !oldAuto) {
-    if (sPumpOffTimer) xTimerStop(sPumpOffTimer, 0);
+    stopManualPump();
     pumpOff();
   }
+  setAutoEnabled(newAuto);
 
-  if (hasManualTime && !setUserTimeOfDaySec(manualTimeSec)) {
+  if (hasManualTime && !clockSetUserTimeOfDaySec(manualTimeSec)) {
       server.send(400, "text/plain", "BAD_TIME");
       return;
   }
@@ -1118,7 +486,10 @@ void handleClearWifiCred() {
 
 void handleClearAllSettings() {
   if (server.method() != HTTP_POST) { server.send(405); return; }
+  stopManualPump();
+  pumpOff();
   bool ok = clearAllSettings();
+  if (ok && WiFi.status() == WL_CONNECTED) clockRequestNtpSync();
   server.send(ok?200:400, "text/plain", ok?"OK":"ERR");
 }
 
@@ -1184,10 +555,7 @@ void handleNodes() {
       }
     }
   }
-  server.setContentLength(measureJson(doc));
-  server.send(200, "application/json", "");
-  WiFiClient client = server.client();
-  serializeJson(doc, client); // Streams directly to the network buffer
+  sendJsonResponseBuffered(doc);
 }
 
 void handleWorkerAdd() {
@@ -1195,21 +563,35 @@ void handleWorkerAdd() {
   String body = server.arg("plain");
   String mac=""; uint16_t th=2000; uint16_t dur=5; String name="";
   JsonDocument doc;
-  if (body.isEmpty() || deserializeJson(doc, body)) {
+  if (body.isEmpty() || deserializeJson(doc, body) || !doc.is<JsonObject>()) {
     server.send(400, "text/plain", "BAD_JSON");
     return;
   }
-  mac = String((const char*)(doc["mac"] | ""));
-  uint32_t thresholdValue = doc["threshold"] | 2000;
-  uint32_t durationValue = doc["duration"] | 5;
+  if (!doc["mac"].is<const char*>()) { server.send(400, "text/plain", "BAD_MAC"); return; }
+  mac = String(doc["mac"].as<const char*>());
+  if ((!doc["threshold"].isNull() && !doc["threshold"].is<uint32_t>()) ||
+      (!doc["duration"].isNull() && !doc["duration"].is<uint32_t>())) {
+    server.send(400, "text/plain", "BAD_VALUES");
+    return;
+  }
+  uint32_t thresholdValue = doc["threshold"].isNull() ? 2000 : doc["threshold"].as<uint32_t>();
+  uint32_t durationValue = doc["duration"].isNull() ? 5 : doc["duration"].as<uint32_t>();
   if (thresholdValue > 4095 || durationValue == 0 || durationValue > 60) {
     server.send(400, "text/plain", "BAD_VALUES");
     return;
   }
   th = thresholdValue;
   dur = durationValue;
-  if (doc["workerName"].is<const char*>()) name = String((const char*)doc["workerName"]);
-  else if (doc["name"].is<const char*>()) name = String((const char*)doc["name"]);
+  const char* nameValue = nullptr;
+  if (!doc["workerName"].isNull()) {
+    if (!doc["workerName"].is<const char*>()) { server.send(400, "text/plain", "BAD_NAME"); return; }
+    nameValue = doc["workerName"].as<const char*>();
+  } else if (!doc["name"].isNull()) {
+    if (!doc["name"].is<const char*>()) { server.send(400, "text/plain", "BAD_NAME"); return; }
+    nameValue = doc["name"].as<const char*>();
+  }
+  if (nameValue && !isValidWebName(nameValue)) { server.send(400, "text/plain", "BAD_NAME"); return; }
+  if (nameValue) name = String(nameValue);
   bool ok = addWorkerByHex(mac.c_str(), th, dur, name.length()?name.c_str():nullptr);
   server.send(ok?200:400, "text/plain", ok?"OK":"ERR");
 }
@@ -1218,11 +600,13 @@ void handleWorkerRemove() {
   if (server.method() != HTTP_POST) { server.send(405); return; }
   String body = server.arg("plain");
   String mac="";
-  if (body.length()) {
-    JsonDocument doc;
-    auto err = deserializeJson(doc, body);
-    if (!err) mac = String((const char*)(doc["mac"] | ""));
+  JsonDocument doc;
+  if (body.isEmpty() || deserializeJson(doc, body) || !doc.is<JsonObject>() ||
+      !doc["mac"].is<const char*>()) {
+    server.send(400, "text/plain", "BAD_JSON");
+    return;
   }
+  mac = String(doc["mac"].as<const char*>());
   bool ok = removeWorkerByHex(mac.c_str());
   server.send(ok?200:400, "text/plain", ok?"OK":"ERR");
 }
@@ -1236,41 +620,72 @@ void handleWorkerUpdate() {
   if (body.length()) {
     JsonDocument doc;
     auto err = deserializeJson(doc, body);
-    if (err) {
+    if (err || !doc.is<JsonObject>()) {
       server.send(400, "text/plain", "BAD_JSON");
       return;
     }
-    mac = String((const char*)(doc["mac"] | ""));
-    uint32_t thresholdValue = doc["threshold"] | 2000;
-    uint32_t durationValue = doc["duration"] | 5;
+    if (!doc["mac"].is<const char*>()) { server.send(400, "text/plain", "BAD_MAC"); return; }
+    mac = String(doc["mac"].as<const char*>());
+    if ((!doc["threshold"].isNull() && !doc["threshold"].is<uint32_t>()) ||
+        (!doc["duration"].isNull() && !doc["duration"].is<uint32_t>())) {
+      server.send(400, "text/plain", "BAD_VALUES");
+      return;
+    }
+    uint32_t thresholdValue = doc["threshold"].isNull() ? 2000 : doc["threshold"].as<uint32_t>();
+    uint32_t durationValue = doc["duration"].isNull() ? 5 : doc["duration"].as<uint32_t>();
     if (thresholdValue > 4095 || durationValue == 0 || durationValue > 60) {
       server.send(400, "text/plain", "BAD_VALUES");
       return;
     }
     th = thresholdValue;
     dur = durationValue;
-    if (doc["name"].is<const char*>()) { name = String((const char*)doc["name"]); hasNameField = true; }
-    if (doc["workerName"].is<const char*>()) { name = String((const char*)doc["workerName"]); hasNameField = true; }
-    if (doc["potIndex"].is<int>()) potIndex = (int)doc["potIndex"];
+    if (!doc["name"].isNull()) {
+      if (!doc["name"].is<const char*>() || !isValidWebName(doc["name"].as<const char*>())) { server.send(400, "text/plain", "BAD_NAME"); return; }
+      name = String(doc["name"].as<const char*>()); hasNameField = true;
+    }
+    if (!doc["workerName"].isNull()) {
+      if (!doc["workerName"].is<const char*>() || !isValidWebName(doc["workerName"].as<const char*>())) { server.send(400, "text/plain", "BAD_NAME"); return; }
+      name = String(doc["workerName"].as<const char*>()); hasNameField = true;
+    }
+    if (!doc["potIndex"].isNull()) {
+      if (!doc["potIndex"].is<int>()) { server.send(400, "text/plain", "BAD_POT_INDEX"); return; }
+      potIndex = doc["potIndex"].as<int>();
+      if (potIndex < 0 || potIndex >= MAX_POTS_PER_DEVICE) { server.send(400, "text/plain", "BAD_POT_INDEX"); return; }
+    }
+  } else {
+    server.send(400, "text/plain", "EMPTY");
+    return;
   }
   bool ok = updateWorkerByHex(mac.c_str(), th, dur, hasNameField ? name.c_str() : nullptr, potIndex);
   server.send(ok?200:400, "text/plain", ok?"OK":"ERR");
 }
 
 void handleWorkerWater() {
+  if (otaIsActive() || workerOtaIsActive()) {
+    server.send(409, "text/plain", "OTA_ACTIVE");
+    return;
+  }
   if (server.method() != HTTP_POST) { server.send(405); return; }
   if (getAutoEnabled()) { server.send(409, "text/plain", "AUTO_MODE"); return; }
   String body = server.arg("plain");
   String mac=""; int dur = -1;
   int potIndex = -1;
-  if (body.length()) {
-    JsonDocument doc;
-    auto err = deserializeJson(doc, body);
-    if (!err) {
-      mac = String((const char*)(doc["mac"] | ""));
-      if (doc["duration"].is<int>()) dur = (int)doc["duration"];
-      if (doc["potIndex"].is<int>()) potIndex = (int)doc["potIndex"];
-    }
+  JsonDocument doc;
+  if (body.isEmpty() || deserializeJson(doc, body) || !doc.is<JsonObject>()) {
+    server.send(400, "text/plain", "BAD_JSON");
+    return;
+  }
+  if (!doc["mac"].is<const char*>()) { server.send(400, "text/plain", "BAD_MAC"); return; }
+  mac = String(doc["mac"].as<const char*>());
+  if (!doc["duration"].isNull()) {
+    if (!doc["duration"].is<int>()) { server.send(400, "text/plain", "BAD_DURATION"); return; }
+    dur = doc["duration"].as<int>();
+    if (dur <= 0 || dur > 60) { server.send(400, "text/plain", "BAD_DURATION"); return; }
+  }
+  if (!doc["potIndex"].isNull()) {
+    if (!doc["potIndex"].is<int>()) { server.send(400, "text/plain", "BAD_POT_INDEX"); return; }
+    potIndex = doc["potIndex"].as<int>();
+    if (potIndex < 0 || potIndex >= MAX_POTS_PER_DEVICE) { server.send(400, "text/plain", "BAD_POT_INDEX"); return; }
   }
   uint8_t macb[6];
   if (!macFromHexString(mac.c_str(), macb)) { server.send(400, "text/plain", "BAD_MAC"); return; }
@@ -1279,8 +694,6 @@ void handleWorkerWater() {
     server.send(400, "text/plain", "NO_WORKER");
     return;
   }
-  if (dur > 60) { server.send(400, "text/plain", "BAD_DURATION"); return; }
-
   uint16_t potMask = 0;
   uint16_t durations[MAX_POTS_PER_DEVICE] = {};
   int durCount = 0;
@@ -1305,6 +718,284 @@ void handleWorkerWater() {
               queued ? "QUEUED" : "BUSY");
 }
 
+void handleOtaStatus() {
+  OtaStatusSnapshot status{};
+  otaGetStatus(status);
+  JsonDocument doc;
+  doc["state"] = otaStateName(status.state);
+  doc["active"] = status.active;
+  doc["packageBytesReceived"] = status.packageBytesReceived;
+  doc["imageBytesReceived"] = status.imageBytesReceived;
+  doc["expectedImageBytes"] = status.expectedImageBytes;
+  doc["packageVersion"] = status.firmwareVersion;
+  doc["packageHardware"] = status.hardwareTarget;
+  doc["currentVersion"] = otaCurrentFirmwareVersion();
+  doc["currentHardware"] = otaCurrentHardwareTarget();
+  doc["freeHeapAtStart"] = status.freeHeapAtStart;
+  doc["largestBlockAtStart"] = status.largestBlockAtStart;
+  if (status.error[0]) doc["error"] = status.error;
+  else doc["error"] = nullptr;
+
+  sendJsonResponse(200, doc);
+}
+
+void handleOtaUploadChunk() {
+  HTTPUpload& upload = server.upload();
+  switch (upload.status) {
+    case UPLOAD_FILE_START: {
+      if (sOtaSawFile) {
+        setOtaRequestError("multiple_files_not_allowed");
+        otaUploadAbort(sOtaRequestError);
+        sOtaAccepted = false;
+        return;
+      }
+      sOtaSawFile = true;
+      RuntimeSnapshot runtime{};
+      getRuntimeSnapshot(runtime);
+      if (runtime.state == WATERING || runtime.state == SYNCING ||
+          otaIsActive() || workerOtaIsActive()) {
+        setOtaRequestError("system_busy");
+        return;
+      }
+      stopManualPump();
+      pumpOff();
+      if (!otaUploadStart()) {
+        OtaStatusSnapshot status{};
+        otaGetStatus(status);
+        setOtaRequestError(status.error[0] ? status.error : "ota_start_failed");
+        return;
+      }
+      sOtaAccepted = true;
+      setRuntimeState(UPDATING);
+      break;
+    }
+
+    case UPLOAD_FILE_WRITE:
+      if (sOtaAccepted &&
+          !otaUploadConsume(upload.buf, upload.currentSize)) {
+        OtaStatusSnapshot status{};
+        otaGetStatus(status);
+        setOtaRequestError(status.error);
+        sOtaAccepted = false;
+      }
+      break;
+
+    case UPLOAD_FILE_END:
+      sOtaFinished = true;
+      if (sOtaAccepted && !otaUploadFinish()) {
+        OtaStatusSnapshot status{};
+        otaGetStatus(status);
+        setOtaRequestError(status.error);
+        sOtaAccepted = false;
+      }
+      break;
+
+    case UPLOAD_FILE_ABORTED:
+      setOtaRequestError("upload_aborted");
+      otaUploadAbort(sOtaRequestError);
+      otaReleaseFailedUpload();
+      sOtaAccepted = false;
+      sOtaFinished = true;
+      break;
+
+    default:
+      break;
+  }
+}
+
+void handleWorkerOtaStatus() {
+  WorkerOtaStatusSnapshot status{};
+  workerOtaGetStatus(status);
+  JsonDocument doc;
+  doc["state"] = workerOtaStateName(status.state);
+  doc["active"] = status.active;
+  if (status.targetMac[0] || status.targetMac[1] || status.targetMac[2] ||
+      status.targetMac[3] || status.targetMac[4] || status.targetMac[5]) {
+    char mac[13];
+    macToHexLower(status.targetMac, mac);
+    for (char* p = mac; *p; ++p) *p = toupper(*p);
+    doc["targetMac"] = mac;
+  } else {
+    doc["targetMac"] = nullptr;
+  }
+  doc["packageBytesReceived"] = status.packageBytesReceived;
+  doc["imageBytesSent"] = status.imageBytesSent;
+  doc["expectedImageBytes"] = status.expectedImageBytes;
+  doc["packageVersion"] = status.packageVersion;
+  doc["packageHardware"] = status.packageHardware;
+  doc["message"] = status.message;
+  sendJsonResponse(200, doc);
+}
+
+void handleWorkerOtaUploadChunk() {
+  HTTPUpload& upload = server.upload();
+  switch (upload.status) {
+    case UPLOAD_FILE_START: {
+      if (sWorkerOtaSawFile) {
+        setWorkerOtaRequestError("multiple_files_not_allowed");
+        workerOtaPackageUploadAbort(sWorkerOtaRequestError);
+        sWorkerOtaAccepted = false;
+        return;
+      }
+      sWorkerOtaSawFile = true;
+      RuntimeSnapshot runtime{};
+      getRuntimeSnapshot(runtime);
+      if (runtime.state == WATERING || runtime.state == SYNCING ||
+          otaIsActive() || workerOtaIsActive()) {
+        setWorkerOtaRequestError("system_busy");
+        return;
+      }
+      stopManualPump();
+      pumpOff();
+      if (!workerOtaPackageUploadStart()) {
+        WorkerOtaStatusSnapshot status{};
+        workerOtaGetStatus(status);
+        setWorkerOtaRequestError(status.message[0] ? status.message
+                                                    : "worker_ota_start_failed");
+        return;
+      }
+      sWorkerOtaAccepted = true;
+      break;
+    }
+
+    case UPLOAD_FILE_WRITE:
+      if (sWorkerOtaAccepted &&
+          !workerOtaPackageUploadConsume(upload.buf, upload.currentSize)) {
+        WorkerOtaStatusSnapshot status{};
+        workerOtaGetStatus(status);
+        setWorkerOtaRequestError(status.message);
+        workerOtaPackageUploadAbort(sWorkerOtaRequestError);
+        sWorkerOtaAccepted = false;
+      }
+      break;
+
+    case UPLOAD_FILE_END:
+      sWorkerOtaFinished = true;
+      if (sWorkerOtaAccepted && !workerOtaPackageUploadFinish()) {
+        WorkerOtaStatusSnapshot status{};
+        workerOtaGetStatus(status);
+        setWorkerOtaRequestError(status.message);
+        sWorkerOtaAccepted = false;
+      }
+      break;
+
+    case UPLOAD_FILE_ABORTED:
+      setWorkerOtaRequestError("upload_aborted");
+      workerOtaPackageUploadAbort(sWorkerOtaRequestError);
+      sWorkerOtaAccepted = false;
+      sWorkerOtaFinished = true;
+      break;
+
+    default:
+      break;
+  }
+}
+
+void handleWorkerOtaRequestComplete() {
+  bool succeeded = sWorkerOtaSawFile && sWorkerOtaFinished &&
+                   !sWorkerOtaRequestError[0];
+  if (!sWorkerOtaSawFile && !sWorkerOtaRequestError[0]) {
+    setWorkerOtaRequestError("missing_firmware_file");
+  } else if (!succeeded && !sWorkerOtaRequestError[0]) {
+    WorkerOtaStatusSnapshot status{};
+    workerOtaGetStatus(status);
+    setWorkerOtaRequestError(status.message[0] ? status.message
+                                                : "worker_update_failed");
+  }
+
+  JsonDocument doc;
+  doc["ok"] = succeeded;
+  if (succeeded) {
+    WorkerOtaStatusSnapshot status{};
+    workerOtaGetStatus(status);
+    doc["version"] = status.packageVersion;
+    doc["imageSize"] = status.expectedImageBytes;
+  } else {
+    doc["error"] = sWorkerOtaRequestError;
+  }
+  String response;
+  serializeJson(doc, response);
+  server.send(succeeded ? 200 : 400, "application/json", response);
+
+  if (!succeeded) workerOtaPackageUploadAbort(sWorkerOtaRequestError);
+  sWorkerOtaSawFile = false;
+  sWorkerOtaAccepted = false;
+  sWorkerOtaFinished = false;
+  sWorkerOtaRequestError[0] = '\0';
+}
+
+void handleWorkerOtaStart() {
+  if (server.method() != HTTP_POST) { server.send(405); return; }
+  if (otaIsActive() || workerOtaIsActive()) {
+    server.send(409, "application/json", "{\"error\":\"OTA_ACTIVE\"}");
+    return;
+  }
+  RuntimeSnapshot runtime{};
+  getRuntimeSnapshot(runtime);
+  if (runtime.state == WATERING || runtime.state == SYNCING) {
+    server.send(409, "application/json", "{\"error\":\"system_busy\"}");
+    return;
+  }
+  String body = server.arg("plain");
+  JsonDocument doc;
+  if (body.isEmpty() || deserializeJson(doc, body) || !doc.is<JsonObject>() ||
+      !doc["mac"].is<const char*>()) {
+    server.send(400, "application/json", "{\"error\":\"BAD_JSON\"}");
+    return;
+  }
+  uint8_t mac[6];
+  if (!macFromHexString(doc["mac"].as<const char*>(), mac)) {
+    server.send(400, "application/json", "{\"error\":\"BAD_MAC\"}");
+    return;
+  }
+  stopManualPump();
+  pumpOff();
+  bool started = workerOtaStartForWorker(mac);
+  WorkerOtaStatusSnapshot status{};
+  workerOtaGetStatus(status);
+  JsonDocument out;
+  out["ok"] = started;
+  out["state"] = workerOtaStateName(status.state);
+  out["message"] = status.message;
+  if (!started) out["error"] = status.message[0] ? status.message : "start_failed";
+  sendJsonResponse(started ? 202 : 400, out);
+}
+
+void handleOtaRequestComplete() {
+  bool succeeded = sOtaSawFile && sOtaFinished && otaUploadSucceeded();
+  if (!sOtaSawFile && !sOtaRequestError[0]) {
+    setOtaRequestError("missing_firmware_file");
+  } else if (!succeeded && !sOtaRequestError[0]) {
+    OtaStatusSnapshot status{};
+    otaGetStatus(status);
+    setOtaRequestError(status.error[0] ? status.error : "update_failed");
+  }
+
+  JsonDocument doc;
+  doc["ok"] = succeeded;
+  if (succeeded) {
+    OtaStatusSnapshot status{};
+    otaGetStatus(status);
+    doc["version"] = status.firmwareVersion;
+    doc["imageSize"] = status.expectedImageBytes;
+    doc["rebooting"] = true;
+  } else {
+    doc["error"] = sOtaRequestError;
+  }
+  String response;
+  serializeJson(doc, response);
+  server.send(succeeded ? 200 : 400, "application/json", response);
+
+  if (!succeeded) {
+    otaReleaseFailedUpload();
+    setRuntimeState(getAutoEnabled() ? SLEEPING : READY);
+  }
+  sOtaSawFile = false;
+  sOtaAccepted = false;
+  sOtaFinished = false;
+  sOtaRequestError[0] = '\0';
+}
+
 void webBegin() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
@@ -1319,10 +1010,17 @@ void webBegin() {
   server.on("/worker/water", HTTP_POST, handleWorkerWater);
   server.on("/wifi/clear", HTTP_POST, handleClearWifiCred);
   server.on("/settings/clear_all", HTTP_POST, handleClearAllSettings);
+  server.on("/ota", HTTP_GET, handleOtaPage);
+  server.on("/ota/status", HTTP_GET, handleOtaStatus);
+  server.on("/ota/main", HTTP_POST, handleOtaRequestComplete,
+            handleOtaUploadChunk);
+  server.on("/ota/worker/status", HTTP_GET, handleWorkerOtaStatus);
+  server.on("/ota/worker", HTTP_POST, handleWorkerOtaRequestComplete,
+            handleWorkerOtaUploadChunk);
+  server.on("/ota/worker/start", HTTP_POST, handleWorkerOtaStart);
   server.begin();
-  // create one-shot pump-off timer (no heap allocation per request)
-  if (!sPumpOffTimer) sPumpOffTimer = xTimerCreate("pumpOff", pdMS_TO_TICKS(5000), pdFALSE, NULL, pumpOffTimerCallback);
-  // OTA handled via ArduinoOTA in main setup
+  // Create the manual pump mutex and one-shot safety timer up front.
+  ensureManualPumpResources();
 }
 
 void webHandleClientLoop() {

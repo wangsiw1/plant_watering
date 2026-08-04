@@ -1,0 +1,249 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Firmware Update</title>
+</head>
+<body>
+  <center>
+    <h2>Firmware Update</h2>
+    <h3>Main</h3>
+    <p>Installed version: <span id="currentVersion">-</span></p>
+    <p>Hardware target: <span id="currentHardware">-</span></p>
+    <p><input id="firmwareFile" type="file" accept=".ota,application/octet-stream"></p>
+    <p><button id="uploadButton" onclick="uploadFirmware()">Upload Firmware</button></p>
+    <p><progress id="uploadProgress" value="0" max="100"></progress></p>
+    <p id="uploadStatus">Idle</p>
+
+    <h3>Worker Firmware</h3>
+    <p><input id="workerFirmwareFile" type="file" accept=".ota,application/octet-stream"></p>
+    <p><button id="workerUploadButton" onclick="uploadWorkerFirmware()">Upload Worker Firmware</button></p>
+    <p><progress id="workerUploadProgress" value="0" max="100"></progress></p>
+    <p id="workerUploadStatus">Idle</p>
+
+    <h3>Workers</h3>
+    <table border="1" cellpadding="6">
+      <thead><tr><th>Name / MAC</th><th>Update</th><th>Status</th></tr></thead>
+      <tbody id="workerOtaRows"><tr><td colspan="3">Loading...</td></tr></tbody>
+    </table>
+    <p><a href="/">Home</a></p>
+  </center>
+
+  <script>
+let uploading = false;
+let workerUploading = false;
+let workerUpdating = false;
+
+async function refreshStatus() {
+  if (uploading || workerUploading) return;
+  try {
+    const response = await fetch('/ota/status', {cache:'no-store'});
+    if (!response.ok) return;
+    const result = await response.json();
+    document.getElementById('currentVersion').innerText = result.currentVersion ?? '-';
+    document.getElementById('currentHardware').innerText = result.currentHardware ?? '-';
+    if (result.state === 'failed') {
+      document.getElementById('uploadStatus').innerText = result.error || 'Update failed';
+    }
+  } catch (e) {}
+  await refreshWorkerOtaStatus();
+}
+
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function refreshWorkers() {
+  const body = document.getElementById('workerOtaRows');
+  try {
+    const response = await fetch('/nodes', {cache:'no-store'});
+    if (!response.ok) throw new Error('worker list failed');
+    const workers = await response.json();
+    if (!Array.isArray(workers) || workers.length === 0) {
+      body.innerHTML = '<tr><td colspan="3">No workers configured</td></tr>';
+      return;
+    }
+    body.innerHTML = '';
+    for (const worker of workers) {
+      const name = worker.workerName ? escapeHtml(worker.workerName) + '<br>' : '';
+      const mac = escapeHtml(worker.mac || '');
+      const row = document.createElement('tr');
+      row.dataset.mac = worker.mac || '';
+      row.innerHTML = `<td>${name}<code>${mac}</code></td><td><button onclick="startWorkerUpdate('${mac}')">Update</button></td><td class="workerOtaStatus"><span class="workerOtaStatusText">Idle</span><br><progress class="workerOtaProgress" value="0" max="100" hidden></progress></td>`;
+      body.appendChild(row);
+    }
+    await refreshWorkerOtaStatus();
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="3">Worker list unavailable</td></tr>';
+  }
+}
+
+function setWorkerButtonsDisabled(disabled) {
+  document.querySelectorAll('#workerOtaRows button').forEach(button => button.disabled = disabled);
+}
+
+function setWorkerStatus(cell, text, progress = null) {
+  if (!cell) return;
+  const label = cell.querySelector('.workerOtaStatusText');
+  const bar = cell.querySelector('.workerOtaProgress');
+  if (label) label.innerText = text;
+  if (bar) {
+    bar.hidden = progress === null;
+    if (progress !== null) bar.value = Math.max(0, Math.min(100, progress));
+  }
+}
+
+async function refreshWorkerOtaStatus() {
+  try {
+    const response = await fetch('/ota/worker/status', {cache:'no-store'});
+    if (!response.ok) return;
+    const result = await response.json();
+    workerUpdating = !!result.active;
+    setWorkerButtonsDisabled(workerUpdating);
+    const storedText = result.packageVersion ? `Stored worker firmware v${result.packageVersion}` : 'No worker firmware stored';
+    if (!workerUploading) document.getElementById('workerUploadStatus').innerText = storedText;
+    if (result.targetMac) {
+      const row = document.querySelector(`#workerOtaRows tr[data-mac="${result.targetMac}"]`);
+      if (row) {
+        const cell = row.querySelector('.workerOtaStatus');
+        const sent = Number(result.imageBytesSent) || 0;
+        const expected = Number(result.expectedImageBytes) || 0;
+        if (result.state === 'transferring' && expected > 0) {
+          const percent = Math.min(100, sent * 100 / expected);
+          setWorkerStatus(cell, `Updating ${Math.floor(percent)}%`, percent);
+        } else if (result.state === 'verifying' || result.state === 'rebooting' || result.state === 'done') {
+          setWorkerStatus(cell, result.message || result.state, 100);
+        } else {
+          setWorkerStatus(cell, result.message || result.state || 'Updating');
+        }
+      }
+    }
+  } catch (e) {}
+}
+
+function uploadFirmware() {
+  if (uploading) return;
+  const fileInput = document.getElementById('firmwareFile');
+  const file = fileInput.files && fileInput.files[0];
+  const button = document.getElementById('uploadButton');
+  const progress = document.getElementById('uploadProgress');
+  const status = document.getElementById('uploadStatus');
+  if (!file) {
+    status.innerText = 'Select an OTA package';
+    return;
+  }
+  if (!confirm('Install this firmware and reboot the main node?')) return;
+
+  uploading = true;
+  button.disabled = true;
+  progress.value = 0;
+  status.innerText = 'Uploading...';
+
+  const request = new XMLHttpRequest();
+  request.open('POST', '/ota/main');
+  request.upload.onprogress = event => {
+    if (event.lengthComputable) progress.value = event.loaded * 100 / event.total;
+  };
+  request.onload = () => {
+    let result = {};
+    try { result = JSON.parse(request.responseText || '{}'); } catch (e) {}
+    if (request.status >= 200 && request.status < 300) {
+      progress.value = 100;
+      status.innerText = 'Verified. Rebooting...';
+    } else {
+      status.innerText = result.error || 'Update failed';
+      uploading = false;
+      button.disabled = false;
+      refreshStatus();
+    }
+  };
+  request.onerror = () => {
+    status.innerText = 'Upload connection failed';
+    uploading = false;
+    button.disabled = false;
+  };
+
+  const body = new FormData();
+  body.append('firmware', file, file.name);
+  request.send(body);
+}
+
+function uploadWorkerFirmware() {
+  if (workerUploading || workerUpdating) return;
+  const fileInput = document.getElementById('workerFirmwareFile');
+  const file = fileInput.files && fileInput.files[0];
+  const button = document.getElementById('workerUploadButton');
+  const progress = document.getElementById('workerUploadProgress');
+  const status = document.getElementById('workerUploadStatus');
+  if (!file) {
+    status.innerText = 'Select a worker OTA package';
+    return;
+  }
+
+  workerUploading = true;
+  button.disabled = true;
+  progress.value = 0;
+  status.innerText = 'Uploading worker firmware...';
+
+  const request = new XMLHttpRequest();
+  request.open('POST', '/ota/worker');
+  request.upload.onprogress = event => {
+    if (event.lengthComputable) progress.value = event.loaded * 100 / event.total;
+  };
+  request.onload = () => {
+    let result = {};
+    try { result = JSON.parse(request.responseText || '{}'); } catch (e) {}
+    if (request.status >= 200 && request.status < 300) {
+      progress.value = 100;
+      status.innerText = 'Worker firmware stored';
+    } else {
+      status.innerText = result.error || 'Worker firmware upload failed';
+    }
+    workerUploading = false;
+    button.disabled = false;
+    refreshWorkerOtaStatus();
+  };
+  request.onerror = () => {
+    status.innerText = 'Worker firmware upload connection failed';
+    workerUploading = false;
+    button.disabled = false;
+  };
+
+  const body = new FormData();
+  body.append('firmware', file, file.name);
+  request.send(body);
+}
+
+async function startWorkerUpdate(mac) {
+  if (!mac || workerUpdating) return;
+  const row = document.querySelector(`#workerOtaRows tr[data-mac="${mac}"]`);
+  const cell = row ? row.querySelector('.workerOtaStatus') : null;
+  setWorkerStatus(cell, 'Starting...');
+  setWorkerButtonsDisabled(true);
+  try {
+    const response = await fetch('/ota/worker/start', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({mac})
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setWorkerStatus(cell, result.error || 'Start failed');
+      setWorkerButtonsDisabled(false);
+      return;
+    }
+    workerUpdating = true;
+    setWorkerStatus(cell, 'Queued');
+  } catch (e) {
+    setWorkerStatus(cell, 'Start failed');
+    setWorkerButtonsDisabled(false);
+  }
+}
+
+refreshStatus();
+refreshWorkers();
+setInterval(refreshStatus, 2000);
+</script>
+</body>
+</html>

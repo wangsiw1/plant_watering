@@ -84,7 +84,13 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
   - Time
     - 24-Hour, minute level (HH:mm)
     - Input by user via web UI
-    - Save user input, and save the epoch time of saving time, use them to calculate approximate current time(something like Current time = user_input_time + (current_ticks - tick_at_saving), be careful with 32-bit integer roll over)
+    - Local-first operation: NTP is optional and manual HH:mm input must work on a network without Internet access
+    - Keep a hidden epoch day so multi-day watering intervals can be measured while only HH:mm is exposed to the user
+    - Restore the later sane value from retained system time or the saved checkpoint; otherwise start at 2000-01-01 00:00 UTC as a usable default clock
+    - Advance time from the 64-bit monotonic ESP timer and accept that elapsed time while fully powered off may be lost
+    - Checkpoint approximate time every six hours and before an intentional main-controller OTA reboot
+    - NTP synchronization is asynchronous and attempted at startup, after WiFi reconnect, after reset while connected, or by explicit user request; failure never invalidates the current clock
+    - Preserve elapsed time since last watering when manual or NTP correction changes the hidden epoch
     - Use this current time for watering time range when auto watering is enabled
   - Wifi
     - If WiFiProvisioner could not connect to any Wifi, setup on board Wifi, allow users connecting to ESP32 C3's AP and access HTTP server through default IP/mDNS

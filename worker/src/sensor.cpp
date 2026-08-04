@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include "Battery.h"
 #include "HardwareConfig.h"
+#include "Valve.h"
 #include "freertos/semphr.h"
 
 static const uint8_t SOIL_SAMPLE_COUNT = 10;
@@ -31,7 +32,10 @@ void sensorBegin() {
 }
 
 void readWorkerSensors() {
-  readBattLevel();
+  if (valveBeginBatterySampling()) {
+    readBattLevel();
+    valveEndBatterySampling();
+  }
   readSoilMoisture();
   if (!gSnapshotMutex) return;
   WorkerSensorSnapshot next{};

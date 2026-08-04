@@ -10,5 +10,5 @@ bool wateringQueueManual(const uint8_t mac[6], uint16_t potMask,
 bool wateringProcessOneManual();
 bool wateringExecuteWorker(const uint8_t mac[6], uint16_t potMask,
                            const uint16_t* durations, size_t durationCount,
-                           bool usePump);
+                           bool abortOnLowTank);
 void wateringNotifyCompleted(const uint8_t mac[6], uint16_t potMask);

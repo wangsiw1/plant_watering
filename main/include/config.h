@@ -7,13 +7,16 @@ enum State : uint8_t {
   READY,
   SYNCING,
   WATERING,
-  SLEEPING
+  SLEEPING,
+  UPDATING
 };
 
 struct Settings {
   char name[UTF8_NAME_STORAGE_BYTES];
   uint32_t waterInterval;
   uint32_t dataSyncInterval;
+  uint8_t pumpDelaySeconds;
+  uint8_t manualPumpTimeoutSeconds;
   uint32_t activeStart;
   uint32_t activeEnd;
   uint64_t savedUtcSec;
@@ -62,6 +65,8 @@ void setRuntimeState(State state);
 void setDataSyncRuntime(int64_t lastSyncUs, int64_t nextSyncUs);
 
 bool connectToWiFi();
+void initializeWiFiMaintenance();
+void serviceWiFiMaintenance();
 void saveWifiCred(const char* ssid, const char* password);
 bool clearWifiCredentials();
 bool clearAllSettings();

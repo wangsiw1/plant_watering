@@ -47,7 +47,7 @@ void readBattLevel() {
   gBattLevel = (uint8_t)constrain((int)((((float)gBattMv - 3300.0f) / (4200.0f - 3300.0f)) * 100.0f), 0, 100);
   LOG("Battery Voltage: %.2fV | Level: %d%%", (gBattMv / 1000.0f), gBattLevel);
 #if WORKER_POT_COUNT != 1
-  if (gBattLevel <= 3) {
+  if (gBattLevel <= 3 && gBattMv > 1000) {
     digitalWrite(SHUTDOWN_PIN, HIGH);
     do {} while(1);
   }

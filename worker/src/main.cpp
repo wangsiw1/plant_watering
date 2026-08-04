@@ -4,6 +4,7 @@
 #include "Sensor.h"
 #include "Valve.h"
 #include "Battery.h"
+#include "WorkerOtaService.h"
 
 // Default periodic status interval (seconds) while not connected to main
 static const uint32_t STATUS_INTERVAL = 10;
@@ -38,7 +39,13 @@ void setup() {
 }
 
 void loop() {
+    workerOtaServiceLoop();
+    if (workerOtaIsActive()) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        return;
+    }
     vTaskDelay(pdMS_TO_TICKS(STATUS_INTERVAL * 1000));
+    workerOtaServiceLoop();
 	// No communication from main over certain time, assuming lost connection, reset main mac and start broadcast again
 	if (btLastCommOverdue()) mainMacReset();
 	if (!mainMacIsSet()) {

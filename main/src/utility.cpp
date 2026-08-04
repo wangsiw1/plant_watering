@@ -1,33 +1,8 @@
 #include "Utility.h"
-#include "config.h"
-#include <time.h>
-#include <WiFi.h>
 #include <esp_mac.h>
 #include <cstring>
 #include <cctype>
 #include <cstdio>
-#include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-
-namespace {
-SemaphoreHandle_t gClockMutex = nullptr;
-uint64_t gClockBaseUtc = 0;
-int64_t gClockBaseUs = 0;
-bool gClockValid = false;
-
-void ensureClockMutex() {
-  if (!gClockMutex) gClockMutex = xSemaphoreCreateMutex();
-}
-
-uint64_t currentClockBaseValue() {
-  ensureClockMutex();
-  xSemaphoreTake(gClockMutex, portMAX_DELAY);
-  uint64_t value = gClockBaseUtc;
-  xSemaphoreGive(gClockMutex);
-  return value;
-}
-}
 
 static inline int hexchar_to_nibble(char c) {
   if (c >= '0' && c <= '9') return c - '0';
@@ -132,93 +107,6 @@ void getWifiMacLast6Hex(char out[7]) {
   snprintf(out, 7, "%02x%02x%02x", mac[3], mac[4], mac[5]);
 }
 
-void initializeClockFromSettings() {
-  Settings settings{};
-  getSettingsSnapshot(settings);
-  ensureClockMutex();
-  xSemaphoreTake(gClockMutex, portMAX_DELAY);
-  gClockBaseUtc = settings.savedUtcSec;
-  gClockBaseUs = esp_timer_get_time();
-  gClockValid = false;
-  xSemaphoreGive(gClockMutex);
-}
-
-bool isClockValid() {
-  ensureClockMutex();
-  xSemaphoreTake(gClockMutex, portMAX_DELAY);
-  bool valid = gClockValid;
-  xSemaphoreGive(gClockMutex);
-  return valid;
-}
-
-bool setUserTimeOfDaySec(uint32_t secOfDay) {
-  if (secOfDay >= 86400) return false;
-  Settings settings{};
-  getSettingsSnapshot(settings);
-  uint64_t referenceUtc = getCurrentEpochSec();
-  if (referenceUtc == 0) referenceUtc = currentClockBaseValue();
-  if (referenceUtc == 0) return false;
-
-  int64_t localReference =
-      static_cast<int64_t>(referenceUtc) +
-      static_cast<int64_t>(settings.tzOffsetMinutes) * 60;
-  int64_t localDay = localReference - ((localReference % 86400 + 86400) % 86400);
-  int64_t newUtc = localDay + secOfDay -
-                   static_cast<int64_t>(settings.tzOffsetMinutes) * 60;
-  if (newUtc <= 0) return false;
-  setUserEpoch(static_cast<uint64_t>(newUtc));
-  return true;
-}
-
-uint32_t getCurrentTimeOfDaySec() {
-  uint64_t utc = getCurrentEpochSec();
-  if (utc == 0) return 0;
-  Settings settings{};
-  getSettingsSnapshot(settings);
-  int64_t local = static_cast<int64_t>(utc) +
-                  static_cast<int64_t>(settings.tzOffsetMinutes) * 60;
-  return static_cast<uint32_t>((local % 86400 + 86400) % 86400);
-}
-
-void setUserEpoch(uint64_t epochSec) {
-  ensureClockMutex();
-  xSemaphoreTake(gClockMutex, portMAX_DELAY);
-  gClockBaseUtc = epochSec;
-  gClockBaseUs = esp_timer_get_time();
-  gClockValid = epochSec != 0;
-  xSemaphoreGive(gClockMutex);
-  setSavedUtc(epochSec, false);
-}
-
-uint64_t getCurrentEpochSec() {
-  ensureClockMutex();
-  xSemaphoreTake(gClockMutex, portMAX_DELAY);
-  bool valid = gClockValid;
-  uint64_t base = gClockBaseUtc;
-  int64_t baseUs = gClockBaseUs;
-  xSemaphoreGive(gClockMutex);
-  if (!valid || base == 0) return 0;
-  int64_t elapsedUs = esp_timer_get_time() - baseUs;
-  if (elapsedUs < 0) elapsedUs = 0;
-  return base + static_cast<uint64_t>(elapsedUs / 1000000LL);
-}
-
-bool trySyncNTP(unsigned long timeoutMs) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-  configTime(0, 0, "pool.ntp.org", "time.google.com");
-  unsigned long start = millis();
-  while (millis() - start < timeoutMs) {
-    time_t utc = time(nullptr);
-    if (utc > 1600000000) {
-      setUserEpoch(static_cast<uint64_t>(utc));
-      saveSettingsNow();
-      return true;
-    }
-    delay(200);
-  }
-  return false;
-}
-
 uint8_t calculateBatteryPercent(uint16_t batteryMv) {
   return (uint8_t)constrain(
       (int)((((float)batteryMv - 3300.0f) / (4200.0f - 3300.0f)) * 100.0f),
@@ -226,6 +114,11 @@ uint8_t calculateBatteryPercent(uint16_t batteryMv) {
 }
 
 uint16_t getCorrectedSoilMoisture(uint16_t batteryMv, uint16_t sensorMv) {
+  // Return raw reading after hardware modification to
+  // directly feed power to sensor from battery
+  // Need correction at low battery(around 3.4V and below)
+  return sensorMv;
+
   if (batteryMv >= 3750) {
     return sensorMv;
   }
@@ -233,16 +126,26 @@ uint16_t getCorrectedSoilMoisture(uint16_t batteryMv, uint16_t sensorMv) {
   int16_t estimatedRailMv = 3750 - batteryMv;
 
   // Apply compensation:
-  // Linear = 937*(3750-battery)/100-25.8+sensor
-  // uint16_t correctedSensorMv = (uint16_t)(
-  //   0.937f * (float)estimatedRailMv - 25.8f + (float)sensorMv
-  // );
-
-  // Polynoimial = -8.57 + 0.682 * sensor + 7.08E-04 * sensor^2
+  // Linear = 937*(3750-battery)/1000-25.8+sensor
   uint16_t correctedSensorMv = (uint16_t)(
-      -8.57f + 0.682f * (float)estimatedRailMv +
-      7.08e-4f * (float)estimatedRailMv * (float)estimatedRailMv +
-      (float)sensorMv);
+    0.937f * (float)estimatedRailMv - 25.8f + (float)sensorMv
+  );
+
+  // Polynoimial = -8.57 + 0.682 * battery + 7.08E-04 * battery^2 +sensor
+  // uint16_t correctedSensorMv = (uint16_t)(
+  //     -8.57f + 0.682f * (float)estimatedRailMv +
+  //     7.08e-4f * (float)estimatedRailMv * (float)estimatedRailMv +
+  //     (float)sensorMv);
+
+  // Ratio, S0 + (sensor_mV - S0) * (Vsens_ref / Vbat - Vf - Vdo_board - Vdo_sensor)
+  // Vf_diode = 300;      // Schottky diode estimate; BAT60J 
+  // Vdo_board = 75;      // dev-board LDO estimate; HT73L33
+  // Vdo_sensor = 75;     // sensor onboard LDO estimate; XC6206P332MR-G
+  // Vsens_ref = 3.30;    // measure during high-battery plateau if possible
+  // S0 = 0.0;            // fit later, or leave at 0 initially
+  // uint16_t correctedSensorMv = (uint16_t)(
+  //   (float)sensorMv * 3300.0f / ((float)estimatedRailMv - 300 - 75 - 75)
+  // );
 
   return correctedSensorMv;
 }
