@@ -1,6 +1,9 @@
 #include "config.h"
+#include "AutoWateringPolicy.h"
 #include "BluetoothMain.h"
+#include "ClockMath.h"
 #include "ClockManager.h"
+#include "AutoRecovery.h"
 
 #include <Preferences.h>
 #include <WiFi.h>
@@ -10,8 +13,6 @@
 #include "freertos/semphr.h"
 
 namespace {
-constexpr uint32_t WATER_INTERVAL_MIN = 60;
-constexpr uint32_t WATER_INTERVAL_MAX = 2419200;
 constexpr uint32_t DATA_SYNC_INTERVAL_MIN = 60;
 constexpr uint32_t DATA_SYNC_INTERVAL_MAX = 2419200;
 constexpr uint8_t PUMP_DELAY_SECONDS_DEFAULT = 1;
@@ -70,6 +71,7 @@ void initializeWorker(WorkerConfig& worker, const uint8_t mac[6],
   for (int pot = 0; pot < worker.potCount; ++pot) {
     worker.thresholds[pot] = DEFAULT_THRESHOLD;
     worker.durations[pot] = DEFAULT_DURATION;
+    worker.waterIntervals[pot] = DEFAULT_WATER_INTERVAL;
   }
 }
 
@@ -81,16 +83,16 @@ int findWorkerLocked(const uint8_t mac[6]) {
 }
 
 bool validSettings(const Settings& value) {
-  return value.waterInterval >= WATER_INTERVAL_MIN &&
-         value.waterInterval <= WATER_INTERVAL_MAX &&
-         value.dataSyncInterval >= DATA_SYNC_INTERVAL_MIN &&
+  return value.dataSyncInterval >= DATA_SYNC_INTERVAL_MIN &&
          value.dataSyncInterval <= DATA_SYNC_INTERVAL_MAX &&
          value.pumpDelaySeconds <= PUMP_DELAY_SECONDS_MAX &&
          value.manualPumpTimeoutSeconds >= MANUAL_PUMP_TIMEOUT_SECONDS_MIN &&
          value.manualPumpTimeoutSeconds <= MANUAL_PUMP_TIMEOUT_SECONDS_MAX &&
          value.activeStart < 86400 && value.activeEnd < 86400 &&
          value.tzOffsetMinutes >= -14 * 60 &&
-         value.tzOffsetMinutes <= 14 * 60;
+         value.tzOffsetMinutes <= 14 * 60 &&
+         (value.language == UiLanguage::ENGLISH ||
+          value.language == UiLanguage::SIMPLIFIED_CHINESE);
 }
 
 bool writeSnapshot(const Settings& settings,
@@ -100,8 +102,6 @@ bool writeSnapshot(const Settings& settings,
   if (!prefs.begin("plant", false)) return false;
   if (prefs.getString("name", "") != settings.name)
     prefs.putString("name", settings.name);
-  if (prefs.getUInt("wint", 0) != settings.waterInterval)
-    prefs.putUInt("wint", settings.waterInterval);
   if (prefs.getUInt("dsint", 0) != settings.dataSyncInterval)
     prefs.putUInt("dsint", settings.dataSyncInterval);
   if (prefs.getUChar("pdelay", UINT8_MAX) != settings.pumpDelaySeconds)
@@ -115,17 +115,15 @@ bool writeSnapshot(const Settings& settings,
     prefs.putUInt("end", settings.activeEnd);
   if (prefs.getInt("tz", INT32_MAX) != settings.tzOffsetMinutes)
     prefs.putInt("tz", settings.tzOffsetMinutes);
+  if (prefs.getUChar("lang", UINT8_MAX) !=
+      static_cast<uint8_t>(settings.language)) {
+    prefs.putUChar("lang", static_cast<uint8_t>(settings.language));
+  }
 
   uint64_t previous64 = 0;
   if (prefs.getBytes("utc64", &previous64, sizeof(previous64)) != sizeof(previous64) ||
       previous64 != settings.savedUtcSec) {
     prefs.putBytes("utc64", &settings.savedUtcSec, sizeof(settings.savedUtcSec));
-  }
-  previous64 = 0;
-  if (prefs.getBytes("lastw64", &previous64, sizeof(previous64)) != sizeof(previous64) ||
-      previous64 != settings.lastWateringUtcSec) {
-    prefs.putBytes("lastw64", &settings.lastWateringUtcSec,
-                   sizeof(settings.lastWateringUtcSec));
   }
   if (prefs.getUInt("wcount", UINT32_MAX) != static_cast<uint32_t>(workerCount))
     prefs.putUInt("wcount", workerCount);
@@ -158,6 +156,24 @@ bool writeSnapshot(const Settings& settings,
         memcmp(previousValues, workers[i].durations, sizeof(previousValues)) != 0) {
       prefs.putBytes(key, workers[i].durations, sizeof(workers[i].durations));
     }
+    uint32_t previousIntervals[MAX_POTS_PER_DEVICE] = {};
+    snprintf(key, sizeof(key), "wintarr%d", i);
+    if (prefs.getBytes(key, previousIntervals, sizeof(previousIntervals)) !=
+            sizeof(previousIntervals) ||
+        memcmp(previousIntervals, workers[i].waterIntervals,
+               sizeof(previousIntervals)) != 0) {
+      prefs.putBytes(key, workers[i].waterIntervals,
+                     sizeof(workers[i].waterIntervals));
+    }
+    uint32_t previousWatering[MAX_POTS_PER_DEVICE] = {};
+    snprintf(key, sizeof(key), "wlastarr%d", i);
+    if (prefs.getBytes(key, previousWatering, sizeof(previousWatering)) !=
+            sizeof(previousWatering) ||
+        memcmp(previousWatering, workers[i].lastAutoWateringUtcSec,
+               sizeof(previousWatering)) != 0) {
+      prefs.putBytes(key, workers[i].lastAutoWateringUtcSec,
+                     sizeof(workers[i].lastAutoWateringUtcSec));
+    }
     for (int pot = 0; pot < workers[i].potCount; ++pot) {
       snprintf(key, sizeof(key), "wpnm%d_%d", i, pot);
       if (prefs.getString(key, "") != workers[i].potName[pot])
@@ -175,12 +191,12 @@ void loadSettings() {
   char defaultName[7];
   getWifiMacLast6Hex(defaultName);
   copyUtf8Truncated(defaultName, loaded.name, sizeof(loaded.name));
-  loaded.waterInterval = 3600;
   loaded.dataSyncInterval = 3600;
   loaded.pumpDelaySeconds = PUMP_DELAY_SECONDS_DEFAULT;
   loaded.manualPumpTimeoutSeconds = MANUAL_PUMP_TIMEOUT_SECONDS_DEFAULT;
   loaded.activeStart = 0;
   loaded.activeEnd = 86399;
+  loaded.language = UiLanguage::ENGLISH;
 
   memset(gPersistenceWorkers, 0, sizeof(gPersistenceWorkers));
   int workerCount = 0;
@@ -188,8 +204,6 @@ void loadSettings() {
   if (prefs.begin("plant", true)) {
     String name = prefs.getString("name", defaultName);
     copyUtf8Truncated(name.c_str(), loaded.name, sizeof(loaded.name));
-    loaded.waterInterval =
-        constrain(prefs.getUInt("wint", 3600), WATER_INTERVAL_MIN, WATER_INTERVAL_MAX);
     loaded.dataSyncInterval =
         constrain(prefs.getUInt("dsint", 3600), DATA_SYNC_INTERVAL_MIN, DATA_SYNC_INTERVAL_MAX);
     loaded.pumpDelaySeconds = static_cast<uint8_t>(constrain(
@@ -204,6 +218,12 @@ void loadSettings() {
         min(prefs.getUInt("end", 86399), static_cast<uint32_t>(86399));
     loaded.tzOffsetMinutes =
         static_cast<int16_t>(constrain(prefs.getInt("tz", 0), -14 * 60, 14 * 60));
+    uint8_t storedLanguage = prefs.getUChar(
+        "lang", static_cast<uint8_t>(UiLanguage::ENGLISH));
+    loaded.language =
+        storedLanguage == static_cast<uint8_t>(UiLanguage::SIMPLIFIED_CHINESE)
+            ? UiLanguage::SIMPLIFIED_CHINESE
+            : UiLanguage::ENGLISH;
     if (prefs.getBytes("utc64", &loaded.savedUtcSec, sizeof(loaded.savedUtcSec)) !=
         sizeof(loaded.savedUtcSec)) {
       uint64_t legacyLocalEpoch = 0;
@@ -215,9 +235,6 @@ void loadSettings() {
         loaded.savedUtcSec = migrated > 0 ? static_cast<uint64_t>(migrated) : 0;
       }
     }
-    prefs.getBytes("lastw64", &loaded.lastWateringUtcSec,
-                   sizeof(loaded.lastWateringUtcSec));
-
     int storedCount = min(static_cast<int>(prefs.getUInt("wcount", 0)),
                           MAX_WORKER_COUNT);
     for (int i = 0; i < storedCount; ++i) {
@@ -241,15 +258,31 @@ void loadSettings() {
       for (int pot = 0; pot < MAX_POTS_PER_DEVICE; ++pot) {
         worker.thresholds[pot] = DEFAULT_THRESHOLD;
         worker.durations[pot] = DEFAULT_DURATION;
+        worker.waterIntervals[pot] = DEFAULT_WATER_INTERVAL;
+        worker.lastAutoWateringUtcSec[pot] = 0;
       }
       snprintf(key, sizeof(key), "wtharr%d", i);
       prefs.getBytes(key, worker.thresholds, sizeof(worker.thresholds));
       snprintf(key, sizeof(key), "wdurarr%d", i);
       prefs.getBytes(key, worker.durations, sizeof(worker.durations));
+      snprintf(key, sizeof(key), "wintarr%d", i);
+      if (prefs.getBytesLength(key) == sizeof(worker.waterIntervals)) {
+        prefs.getBytes(key, worker.waterIntervals,
+                       sizeof(worker.waterIntervals));
+      }
+      snprintf(key, sizeof(key), "wlastarr%d", i);
+      if (prefs.getBytesLength(key) ==
+          sizeof(worker.lastAutoWateringUtcSec)) {
+        prefs.getBytes(key, worker.lastAutoWateringUtcSec,
+                       sizeof(worker.lastAutoWateringUtcSec));
+      }
       for (int pot = 0; pot < worker.potCount; ++pot) {
         worker.thresholds[pot] = min(worker.thresholds[pot], static_cast<uint16_t>(4095));
         worker.durations[pot] =
             static_cast<uint16_t>(constrain(worker.durations[pot], 1, 60));
+        worker.waterIntervals[pot] = constrain(
+            worker.waterIntervals[pot], WATER_INTERVAL_MIN,
+            WATER_INTERVAL_MAX);
         snprintf(key, sizeof(key), "wpnm%d_%d", i, pot);
         String potName = prefs.getString(key, "");
         copyUtf8Truncated(potName.c_str(), worker.potName[pot],
@@ -293,10 +326,43 @@ void setSavedUtc(uint64_t utcSec, bool saveImmediately) {
   if (saveImmediately) saveSettingsNow();
 }
 
-void setLastWateringUtc(uint64_t utcSec) {
+void recordCompletedAutoWateringBatch(
+    const CompletedAutoWatering* completions, size_t completionCount,
+    uint32_t completedUtcSec) {
+  if (!completions || completionCount == 0 || completedUtcSec == 0) return;
   lockConfig();
-  gSettings.lastWateringUtcSec = utcSec;
-  markDirtyLocked();
+  bool changed = false;
+  for (size_t completion = 0; completion < completionCount; ++completion) {
+    int workerIndex = findWorkerLocked(completions[completion].mac);
+    if (workerIndex < 0) continue;
+    WorkerConfig& worker = gWorkers[workerIndex];
+    changed |= applyCompletedAutoWatering(
+        worker.lastAutoWateringUtcSec, worker.potCount,
+        completions[completion].potMask, completedUtcSec);
+  }
+  if (changed) markDirtyLocked();
+  unlockConfig();
+}
+
+void rebaseLastAutoWateringTimestamps(uint64_t oldNowUtcSec,
+                                      uint64_t newNowUtcSec) {
+  if (newNowUtcSec == 0 || newNowUtcSec > UINT32_MAX) return;
+  lockConfig();
+  bool changed = false;
+  for (int workerIndex = 0; workerIndex < gWorkerCount; ++workerIndex) {
+    WorkerConfig& worker = gWorkers[workerIndex];
+    for (int pot = 0; pot < worker.potCount; ++pot) {
+      uint32_t previous = worker.lastAutoWateringUtcSec[pot];
+      uint64_t rebased = clockRebaseTimestampPreservingAge(
+          oldNowUtcSec, newNowUtcSec, previous);
+      uint32_t next = static_cast<uint32_t>(rebased);
+      if (next != previous) {
+        worker.lastAutoWateringUtcSec[pot] = next;
+        changed = true;
+      }
+    }
+  }
+  if (changed) markDirtyLocked();
   unlockConfig();
 }
 
@@ -375,10 +441,10 @@ bool removeWorkerByHex(const char* macHex) {
 }
 
 bool updateWorkerByHex(const char* macHex, uint16_t threshold, uint16_t duration,
-                       const char* name, int potIndex) {
+                       uint32_t waterInterval, const char* name, int potIndex) {
   uint8_t mac[6];
   if (!macFromHexString(macHex, mac) || threshold > 4095 ||
-      duration == 0 || duration > 60) {
+      duration == 0 || duration > 60 || !validWaterInterval(waterInterval)) {
     return false;
   }
   lockConfig();
@@ -392,11 +458,14 @@ bool updateWorkerByHex(const char* macHex, uint16_t threshold, uint16_t duration
     for (int pot = worker.potCount; pot <= potIndex; ++pot) {
       worker.thresholds[pot] = DEFAULT_THRESHOLD;
       worker.durations[pot] = DEFAULT_DURATION;
+      worker.waterIntervals[pot] = DEFAULT_WATER_INTERVAL;
+      worker.lastAutoWateringUtcSec[pot] = 0;
       worker.potName[pot][0] = '\0';
     }
     if (potIndex >= worker.potCount) worker.potCount = potIndex + 1;
     worker.thresholds[potIndex] = threshold;
     worker.durations[potIndex] = duration;
+    worker.waterIntervals[potIndex] = waterInterval;
     if (name) copyUtf8Truncated(name, worker.potName[potIndex],
                                 sizeof(worker.potName[potIndex]));
   } else if (name) {
@@ -420,6 +489,8 @@ void ensureWorkerConfigsForMac(const uint8_t mac[6], uint8_t potCount) {
   for (int pot = worker.potCount; pot < potCount; ++pot) {
     worker.thresholds[pot] = DEFAULT_THRESHOLD;
     worker.durations[pot] = DEFAULT_DURATION;
+    worker.waterIntervals[pot] = DEFAULT_WATER_INTERVAL;
+    worker.lastAutoWateringUtcSec[pot] = 0;
     worker.potName[pot][0] = '\0';
   }
   worker.potCount = potCount;
@@ -440,9 +511,13 @@ bool getAutoEnabled() {
 }
 
 void setAutoEnabled(bool enabled) {
+  // Disarming the retained intent first ensures a reset cannot undo a user's
+  // request to turn automation off.
+  if (!enabled) autoRecoverySetArmed(false);
   lockConfig();
   gRuntime.autoEnabled = enabled;
   unlockConfig();
+  if (enabled) autoRecoverySetArmed(true);
 }
 
 void setRuntimeState(State state) {
@@ -458,13 +533,16 @@ void setDataSyncRuntime(int64_t lastSyncUs, int64_t nextSyncUs) {
   unlockConfig();
 }
 
-bool connectToWiFi() {
+WiFiStartupResult connectToWiFi() {
   ensureMutexes();
   xSemaphoreTake(gPersistenceMutex, portMAX_DELAY);
   Preferences prefs;
   if (!prefs.begin("plant", true)) {
     xSemaphoreGive(gPersistenceMutex);
-    return false;
+    lockConfig();
+    gWifiCredentialsAvailable = false;
+    unlockConfig();
+    return WiFiStartupResult::NO_SAVED_CREDENTIALS;
   }
   String ssid = prefs.getString("ssid", "");
   String password = prefs.getString("password", "");
@@ -473,7 +551,7 @@ bool connectToWiFi() {
   lockConfig();
   gWifiCredentialsAvailable = !ssid.isEmpty();
   unlockConfig();
-  if (ssid.isEmpty()) return false;
+  if (ssid.isEmpty()) return WiFiStartupResult::NO_SAVED_CREDENTIALS;
   WiFi.setAutoReconnect(true);
   if (password.isEmpty()) WiFi.begin(ssid.c_str());
   else WiFi.begin(ssid.c_str(), password.c_str());
@@ -481,7 +559,8 @@ bool connectToWiFi() {
   while (WiFi.status() != WL_CONNECTED && esp_timer_get_time() < deadline) {
     delay(250);
   }
-  return WiFi.status() == WL_CONNECTED;
+  return WiFi.status() == WL_CONNECTED ? WiFiStartupResult::CONNECTED
+                                       : WiFiStartupResult::CONNECTION_FAILED;
 }
 
 void initializeWiFiMaintenance() {
@@ -493,7 +572,7 @@ void initializeWiFiMaintenance() {
   unlockConfig();
 }
 
-void serviceWiFiMaintenance() {
+bool serviceWiFiMaintenance() {
   bool connected = WiFi.status() == WL_CONNECTED;
   bool requestNtp = false;
   bool reconnect = false;
@@ -534,6 +613,7 @@ void serviceWiFiMaintenance() {
     LOG("WiFi reconnected; requesting NTP sync");
     clockRequestNtpSync();
   }
+  return requestNtp;
 }
 
 void saveWifiCred(const char* ssid, const char* password) {
@@ -585,15 +665,16 @@ bool clearAllSettings() {
 
   char defaultName[7];
   getWifiMacLast6Hex(defaultName);
+  autoRecoverySetArmed(false);
   lockConfig();
   memset(&gSettings, 0, sizeof(gSettings));
   copyUtf8Truncated(defaultName, gSettings.name, sizeof(gSettings.name));
-  gSettings.waterInterval = 3600;
   gSettings.dataSyncInterval = 3600;
   gSettings.pumpDelaySeconds = PUMP_DELAY_SECONDS_DEFAULT;
   gSettings.manualPumpTimeoutSeconds =
       MANUAL_PUMP_TIMEOUT_SECONDS_DEFAULT;
   gSettings.activeEnd = 86399;
+  gSettings.language = UiLanguage::ENGLISH;
   memset(gWorkers, 0, sizeof(gWorkers));
   gWorkerCount = 0;
   gRuntime = {READY, false, 0, 0};

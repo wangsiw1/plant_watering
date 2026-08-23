@@ -169,7 +169,7 @@ bool wateringExecuteWorker(const uint8_t mac[6], uint16_t potMask,
     return false;
   }
 
-  if (abortOnLowTank && getTankLevel() <= 2800) {
+  if (abortOnLowTank && isTankLow()) {
     LOG("Watering execute rejected reason=tank_low worker=%s tank_mv=%u",
         target, static_cast<unsigned>(getTankLevel()));
     return false;
@@ -195,7 +195,7 @@ bool wateringExecuteWorker(const uint8_t mac[6], uint16_t potMask,
       static_cast<int64_t>(totalSeconds + WATER_COMPLETION_MARGIN_SECONDS) *
           1000000LL;
   while (!completionReceived() && esp_timer_get_time() < deadlineUs) {
-    if (abortOnLowTank && getTankLevel() <= 2800) {
+    if (abortOnLowTank && isTankLow()) {
       LOG("Watering wait abort reason=tank_low worker=%s tank_mv=%u",
           target, static_cast<unsigned>(getTankLevel()));
       break;

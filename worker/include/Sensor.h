@@ -14,4 +14,3 @@ void readWorkerSensors();
 bool getWorkerSensorSnapshot(WorkerSensorSnapshot &snapshot);
 // Get soil for channel index (default 0 for single-pot compatibility)
 uint16_t getSoilMoisture(size_t idx = 0);
-uint16_t getCorrectedSoilMoisture(uint16_t batteryMv, uint16_t sensorMv);

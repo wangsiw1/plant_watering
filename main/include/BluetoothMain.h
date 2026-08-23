@@ -9,6 +9,7 @@ struct WorkerNode {
   uint8_t potCount;
   uint16_t soils[MAX_POTS_PER_DEVICE];
   uint16_t batteryMv;
+  uint32_t firmwareVersion;
   int16_t lastRssi;
   int64_t lastSyncUs;
   int64_t lastWaterUs[MAX_POTS_PER_DEVICE];

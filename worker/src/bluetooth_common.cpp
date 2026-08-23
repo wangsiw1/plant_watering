@@ -517,6 +517,21 @@ bool btTlvReadRequiredU32(const uint8_t* tlvs, size_t len, uint8_t type, uint32_
   return true;
 }
 
+bool btTlvReadOptionalU32(const uint8_t* tlvs, size_t len, uint8_t type,
+                          uint32_t& out, bool& found) {
+  TlvFieldView field{};
+  if (!findFirstField(tlvs, len, type, field, found)) return false;
+  if (!found) {
+    out = 0;
+    return true;
+  }
+  if (field.len != 4) return false;
+  out = (static_cast<uint32_t>(field.value[0]) << 24) |
+        (static_cast<uint32_t>(field.value[1]) << 16) |
+        (static_cast<uint32_t>(field.value[2]) << 8) | field.value[3];
+  return true;
+}
+
 bool btTlvReadRequiredBytes(const uint8_t* tlvs, size_t len, uint8_t type,
                             const uint8_t*& out, uint8_t& outLen) {
   TlvFieldView field{};

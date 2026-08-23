@@ -117,35 +117,18 @@ uint16_t getCorrectedSoilMoisture(uint16_t batteryMv, uint16_t sensorMv) {
   // Return raw reading after hardware modification to
   // directly feed power to sensor from battery
   // Need correction at low battery(around 3.4V and below)
-  return sensorMv;
+  
+  // return sensorMv;
 
-  if (batteryMv >= 3750) {
+  if (batteryMv >= 3700) {
     return sensorMv;
   }
 
-  int16_t estimatedRailMv = 3750 - batteryMv;
-
-  // Apply compensation:
-  // Linear = 937*(3750-battery)/1000-25.8+sensor
+  // Apply low voltage compensation:
+  int16_t estimatedRailMv = 3700 - batteryMv;
   uint16_t correctedSensorMv = (uint16_t)(
-    0.937f * (float)estimatedRailMv - 25.8f + (float)sensorMv
+    0.075f * (float)estimatedRailMv + (float)sensorMv
   );
-
-  // Polynoimial = -8.57 + 0.682 * battery + 7.08E-04 * battery^2 +sensor
-  // uint16_t correctedSensorMv = (uint16_t)(
-  //     -8.57f + 0.682f * (float)estimatedRailMv +
-  //     7.08e-4f * (float)estimatedRailMv * (float)estimatedRailMv +
-  //     (float)sensorMv);
-
-  // Ratio, S0 + (sensor_mV - S0) * (Vsens_ref / Vbat - Vf - Vdo_board - Vdo_sensor)
-  // Vf_diode = 300;      // Schottky diode estimate; BAT60J 
-  // Vdo_board = 75;      // dev-board LDO estimate; HT73L33
-  // Vdo_sensor = 75;     // sensor onboard LDO estimate; XC6206P332MR-G
-  // Vsens_ref = 3.30;    // measure during high-battery plateau if possible
-  // S0 = 0.0;            // fit later, or leave at 0 initially
-  // uint16_t correctedSensorMv = (uint16_t)(
-  //   (float)sensorMv * 3300.0f / ((float)estimatedRailMv - 300 - 75 - 75)
-  // );
 
   return correctedSensorMv;
 }

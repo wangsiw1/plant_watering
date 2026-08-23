@@ -56,6 +56,7 @@ namespace BT_TLV {
   constexpr uint8_t FIELD_SLEEP_SEC = 0x04;
   constexpr uint8_t FIELD_POT_MASK = 0x05;
   constexpr uint8_t FIELD_DURATION_LIST = 0x06;
+  constexpr uint8_t FIELD_FW_VERSION = 0x07;
 
   struct TlvFieldView {
     uint8_t type;
@@ -94,6 +95,8 @@ namespace BT_TLV {
   bool btTlvReadRequiredU8(const uint8_t* tlvs, size_t tlvsLen, uint8_t type, uint8_t& out);
   bool btTlvReadRequiredU16(const uint8_t* tlvs, size_t tlvsLen, uint8_t type, uint16_t& out);
   bool btTlvReadRequiredU32(const uint8_t* tlvs, size_t tlvsLen, uint8_t type, uint32_t& out);
+  bool btTlvReadOptionalU32(const uint8_t* tlvs, size_t tlvsLen, uint8_t type,
+                            uint32_t& out, bool& found);
   bool btTlvReadRequiredBytes(const uint8_t* tlvs, size_t tlvsLen, uint8_t type,
                               const uint8_t*& out, uint8_t& outLen);
   bool btTlvReadRequiredU16Array(const uint8_t* tlvs, size_t tlvsLen, uint8_t type,

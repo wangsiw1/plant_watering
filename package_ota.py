@@ -54,9 +54,8 @@ def project_int_option(name):
 #                        project's partition table. Main uses 0x170000-byte
 #                        slots; worker projects keep their own configured limit.
 #
-# The running firmware currently rejects only version 0. A stricter minimum
-# accepted version or anti-downgrade policy would be implemented in
-# firmware_package.cpp or ota_manager.cpp, not here.
+# The package format rejects version 0. Each running firmware role enforces its
+# own FW_MIN_ALLOWED_VERSION and rejects reinstalling its current version.
 firmware_version = project_int_option("custom_fw_version")
 firmware_role_name = env.GetProjectOption("custom_fw_role", "main").strip().lower()
 hardware_target = project_int_option("custom_fw_hardware")

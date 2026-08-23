@@ -1,4 +1,5 @@
 #include "WebUI.h"
+#include "AutoWateringPolicy.h"
 #include "config.h"
 #include "ClockManager.h"
 #include "Utility.h"
@@ -31,13 +32,17 @@ static TaskHandle_t sWebTask = nullptr;
 static TaskHandle_t sSensorTask = nullptr;
 static TaskHandle_t sWateringTask = nullptr;
 static bool sOtaSawFile = false;
+static bool sOtaStarted = false;
 static bool sOtaAccepted = false;
 static bool sOtaFinished = false;
 static char sOtaRequestError[48] = {};
+static int sOtaRequestErrorStatus = 400;
 static bool sWorkerOtaSawFile = false;
+static bool sWorkerOtaStarted = false;
 static bool sWorkerOtaAccepted = false;
 static bool sWorkerOtaFinished = false;
 static char sWorkerOtaRequestError[80] = {};
+static int sWorkerOtaRequestErrorStatus = 400;
 static String sJsonResponse;
 
 constexpr size_t JSON_STREAM_BUFFER_SIZE = 512;
@@ -77,6 +82,7 @@ static TimerHandle_t sPumpOffTimer = nullptr;
 static SemaphoreHandle_t sManualPumpMutex = nullptr;
 static bool sManualPumpActive = false;
 static int64_t sManualPumpDeadlineUs = 0;
+constexpr uint32_t MANUAL_PUMP_TANK_CHECK_MS = 100;
 
 static void pumpOffTimerCallback(TimerHandle_t xTimer) {
   if (!sManualPumpMutex) return;
@@ -86,11 +92,24 @@ static void pumpOffTimerCallback(TimerHandle_t xTimer) {
     return;
   }
 
+  if (!isTankSafe()) {
+    int tankLevel = getTankLevel();
+    bool tankReady = tankSensorIsReady();
+    sManualPumpActive = false;
+    sManualPumpDeadlineUs = 0;
+    pumpOff();
+    xSemaphoreGive(sManualPumpMutex);
+    LOG("Manual pump safety stop reason=tank_unsafe tank_ready=%u tank_mv=%d",
+        tankReady ? 1u : 0u, tankLevel);
+    return;
+  }
+
   int64_t nowUs = esp_timer_get_time();
   if (nowUs < sManualPumpDeadlineUs) {
     uint32_t remainingMs = static_cast<uint32_t>(
         (sManualPumpDeadlineUs - nowUs + 999) / 1000);
-    TickType_t remainingTicks = pdMS_TO_TICKS(remainingMs);
+    uint32_t nextCheckMs = min(remainingMs, MANUAL_PUMP_TANK_CHECK_MS);
+    TickType_t remainingTicks = pdMS_TO_TICKS(nextCheckMs);
     if (remainingTicks == 0) remainingTicks = 1;
     if (xTimerChangePeriod(xTimer, remainingTicks, 0) == pdPASS) {
       xSemaphoreGive(sManualPumpMutex);
@@ -134,15 +153,19 @@ static void stopManualPump() {
 }
 
 static bool startManualPump(uint8_t timeoutSeconds) {
+  if (!isTankSafe()) return false;
   if (!ensureManualPumpResources()) return false;
-  TickType_t timeoutTicks =
-      pdMS_TO_TICKS(static_cast<uint32_t>(timeoutSeconds) * 1000u);
-  if (timeoutTicks == 0) timeoutTicks = 1;
+  TickType_t firstCheckTicks = pdMS_TO_TICKS(MANUAL_PUMP_TANK_CHECK_MS);
+  if (firstCheckTicks == 0) firstCheckTicks = 1;
 
   xSemaphoreTake(sManualPumpMutex, portMAX_DELAY);
+  if (!isTankSafe()) {
+    xSemaphoreGive(sManualPumpMutex);
+    return false;
+  }
   sManualPumpDeadlineUs =
       esp_timer_get_time() + static_cast<int64_t>(timeoutSeconds) * 1000000LL;
-  if (xTimerChangePeriod(sPumpOffTimer, timeoutTicks, 0) != pdPASS) {
+  if (xTimerChangePeriod(sPumpOffTimer, firstCheckTicks, 0) != pdPASS) {
     sManualPumpDeadlineUs = 0;
     sManualPumpActive = false;
     pumpOff();
@@ -164,6 +187,23 @@ static const char *stateToString(State currentState) {
     case UPDATING: return "UPDATING";
     default: return "UNKNOWN";
   }
+}
+
+static const char* uiLanguageCode(UiLanguage language) {
+  return language == UiLanguage::SIMPLIFIED_CHINESE ? "zh-CN" : "en";
+}
+
+static bool parseUiLanguage(const char* value, UiLanguage& language) {
+  if (!value) return false;
+  if (strcmp(value, "en") == 0) {
+    language = UiLanguage::ENGLISH;
+    return true;
+  }
+  if (strcmp(value, "zh-CN") == 0) {
+    language = UiLanguage::SIMPLIFIED_CHINESE;
+    return true;
+  }
+  return false;
 }
 
 static bool isValidWebName(const char* value) {
@@ -229,9 +269,9 @@ void handleStatus() {
   doc["name"] = settings.name;
   doc["auto"] = runtime.autoEnabled;
   doc["tank"] = tank;
+  doc["tankSafe"] = isTankSafe();
   doc["now"] = now;
   doc["timeOfDaySec"] = tod;
-  doc["waterInterval"] = settings.waterInterval;
   doc["dataSyncInterval"] = settings.dataSyncInterval;
   doc["pumpDelay"] = settings.pumpDelaySeconds;
   doc["manualPumpTimeout"] = settings.manualPumpTimeoutSeconds;
@@ -239,6 +279,7 @@ void handleStatus() {
   doc["tzOffsetMinutes"] = settings.tzOffsetMinutes;
   doc["activeStart"] = settings.activeStart;
   doc["activeEnd"] = settings.activeEnd;
+  doc["language"] = uiLanguageCode(settings.language);
   doc["workerCount"] = getWorkerConfigCount();
   doc["maxWorkerCount"] = MAX_WORKER_COUNT;
   doc["state"] = stateToString(runtime.state);
@@ -264,12 +305,6 @@ void handleStatus() {
   }
   uint64_t curEpoch = clockGetCurrentEpochSec();
   if (curEpoch) doc["epoch"] = curEpoch;
-  if (settings.lastWateringUtcSec != 0 &&
-      curEpoch >= settings.lastWateringUtcSec) {
-    doc["lastAutoWateringAgo"] = curEpoch - settings.lastWateringUtcSec;
-  } else {
-    doc["lastAutoWateringAgo"] = nullptr;
-  }
 
   sendJsonResponse(200, doc);
 }
@@ -353,9 +388,17 @@ void handlePumpToggle() {
     server.send(409, "text/plain", "AUTO_MODE");
     return;
   }
+  if (!isTankSafe()) {
+    server.send(409, "text/plain", "TANK_UNSAFE");
+    return;
+  }
   Settings settings{};
   getSettingsSnapshot(settings);
   if (!startManualPump(settings.manualPumpTimeoutSeconds)) {
+    if (!isTankSafe()) {
+      server.send(409, "text/plain", "TANK_UNSAFE");
+      return;
+    }
     server.send(503, "text/plain", "PUMP_TIMER_FAILED");
     return;
   }
@@ -386,13 +429,20 @@ void handleSettings() {
     }
     copyUtf8Truncated(doc["name"].as<const char*>(), next.name, sizeof(next.name));
   }
+  if (!doc["language"].isNull()) {
+    if (!doc["language"].is<const char*>() ||
+        !parseUiLanguage(doc["language"].as<const char*>(), next.language)) {
+      server.send(400, "text/plain", "BAD_LANGUAGE");
+      return;
+    }
+  }
   if (!doc["auto"].isNull()) {
     if (!doc["auto"].is<bool>()) { server.send(400, "text/plain", "BAD_AUTO"); return; }
     newAuto = doc["auto"].as<bool>();
   }
-  if (!doc["wint"].isNull()) {
-    if (!doc["wint"].is<uint32_t>()) { server.send(400, "text/plain", "BAD_WATER_INTERVAL"); return; }
-    next.waterInterval = doc["wint"].as<uint32_t>();
+  if (newAuto && (otaIsActive() || workerOtaIsActive())) {
+    server.send(409, "text/plain", "OTA_ACTIVE");
+    return;
   }
   if (!doc["dsint"].isNull()) {
     if (!doc["dsint"].is<uint32_t>()) { server.send(400, "text/plain", "BAD_SYNC_INTERVAL"); return; }
@@ -498,6 +548,7 @@ void handleNodes() {
   JsonDocument doc;
   JsonArray arr = doc.to<JsonArray>();
   int64_t nowUs = esp_timer_get_time();
+  uint64_t nowUtc = clockGetCurrentEpochSec();
   int workerCount = getWorkerConfigCount();
   for (int i = 0; i < workerCount; ++i) {
     WorkerConfig wc{};
@@ -523,12 +574,18 @@ void handleNodes() {
         o["lastSyncAgo"] = nullptr;
       }
       o["nodePotCount"] = node.potCount;
+      if (node.firmwareVersion != 0) {
+        o["firmwareVersion"] = node.firmwareVersion;
+      } else {
+        o["firmwareVersion"] = nullptr;
+      }
     } else {
       o["battery"] = nullptr;
       o["batteryMv"] = nullptr;
       o["rssi"] = nullptr;
       o["lastSyncAgo"] = nullptr;
       o["nodePotCount"] = nullptr;
+      o["firmwareVersion"] = nullptr;
     }
     int potCount = wc.potCount;
     if (potCount > MAX_POTS_PER_DEVICE) potCount = MAX_POTS_PER_DEVICE;
@@ -538,6 +595,7 @@ void handleNodes() {
       po["name"] = wc.potName[p];
       po["threshold"] = wc.thresholds[p];
       po["duration"] = wc.durations[p];
+      po["waterInterval"] = wc.waterIntervals[p];
       if (hasNode && p < node.potCount) {
         po["soil"] =
             (int)getCorrectedSoilMoisture(node.batteryMv, node.soils[p]);
@@ -546,12 +604,11 @@ void handleNodes() {
         po["soil"] = nullptr;
         po["soilRaw"] = nullptr;
       }
-      int64_t lastWaterUs = hasNode ? node.lastWaterUs[p] : 0;
-      if (lastWaterUs != 0 && nowUs >= lastWaterUs) {
-        po["lastWaterAgo"] =
-            static_cast<uint64_t>((nowUs - lastWaterUs) / 1000000LL);
+      uint32_t lastAutoWateringUtc = wc.lastAutoWateringUtcSec[p];
+      if (lastAutoWateringUtc != 0 && nowUtc >= lastAutoWateringUtc) {
+        po["lastAutoWateringAgo"] = nowUtc - lastAutoWateringUtc;
       } else {
-        po["lastWaterAgo"] = nullptr;
+        po["lastAutoWateringAgo"] = nullptr;
       }
     }
   }
@@ -615,6 +672,7 @@ void handleWorkerUpdate() {
   if (server.method() != HTTP_POST) { server.send(405); return; }
   String body = server.arg("plain");
   String mac=""; uint16_t th=2000; uint16_t dur=5; String name="";
+  uint32_t waterInterval = DEFAULT_WATER_INTERVAL;
   int potIndex = -1;
   bool hasNameField = false;
   if (body.length()) {
@@ -652,11 +710,24 @@ void handleWorkerUpdate() {
       potIndex = doc["potIndex"].as<int>();
       if (potIndex < 0 || potIndex >= MAX_POTS_PER_DEVICE) { server.send(400, "text/plain", "BAD_POT_INDEX"); return; }
     }
+    if (potIndex >= 0) {
+      if (!doc["waterInterval"].is<uint32_t>()) {
+        server.send(400, "text/plain", "BAD_WATER_INTERVAL");
+        return;
+      }
+      waterInterval = doc["waterInterval"].as<uint32_t>();
+      if (!validWaterInterval(waterInterval)) {
+        server.send(400, "text/plain", "BAD_WATER_INTERVAL");
+        return;
+      }
+    }
   } else {
     server.send(400, "text/plain", "EMPTY");
     return;
   }
-  bool ok = updateWorkerByHex(mac.c_str(), th, dur, hasNameField ? name.c_str() : nullptr, potIndex);
+  bool ok = updateWorkerByHex(mac.c_str(), th, dur, waterInterval,
+                              hasNameField ? name.c_str() : nullptr,
+                              potIndex);
   server.send(ok?200:400, "text/plain", ok?"OK":"ERR");
 }
 
@@ -720,7 +791,9 @@ void handleWorkerWater() {
 
 void handleOtaStatus() {
   OtaStatusSnapshot status{};
+  Settings settings{};
   otaGetStatus(status);
+  getSettingsSnapshot(settings);
   JsonDocument doc;
   doc["state"] = otaStateName(status.state);
   doc["active"] = status.active;
@@ -731,6 +804,7 @@ void handleOtaStatus() {
   doc["packageHardware"] = status.hardwareTarget;
   doc["currentVersion"] = otaCurrentFirmwareVersion();
   doc["currentHardware"] = otaCurrentHardwareTarget();
+  doc["language"] = uiLanguageCode(settings.language);
   doc["freeHeapAtStart"] = status.freeHeapAtStart;
   doc["largestBlockAtStart"] = status.largestBlockAtStart;
   if (status.error[0]) doc["error"] = status.error;
@@ -743,9 +817,15 @@ void handleOtaUploadChunk() {
   HTTPUpload& upload = server.upload();
   switch (upload.status) {
     case UPLOAD_FILE_START: {
+      if (getAutoEnabled()) {
+        sOtaSawFile = true;
+        setOtaRequestError("AUTO_MODE");
+        sOtaRequestErrorStatus = 409;
+        return;
+      }
       if (sOtaSawFile) {
         setOtaRequestError("multiple_files_not_allowed");
-        otaUploadAbort(sOtaRequestError);
+        if (sOtaStarted) otaUploadAbort(sOtaRequestError);
         sOtaAccepted = false;
         return;
       }
@@ -759,6 +839,7 @@ void handleOtaUploadChunk() {
       }
       stopManualPump();
       pumpOff();
+      sOtaStarted = true;
       if (!otaUploadStart()) {
         OtaStatusSnapshot status{};
         otaGetStatus(status);
@@ -791,9 +872,11 @@ void handleOtaUploadChunk() {
       break;
 
     case UPLOAD_FILE_ABORTED:
-      setOtaRequestError("upload_aborted");
-      otaUploadAbort(sOtaRequestError);
-      otaReleaseFailedUpload();
+      if (!sOtaRequestError[0]) setOtaRequestError("upload_aborted");
+      if (sOtaStarted) {
+        otaUploadAbort(sOtaRequestError);
+        otaReleaseFailedUpload();
+      }
       sOtaAccepted = false;
       sOtaFinished = true;
       break;
@@ -831,9 +914,17 @@ void handleWorkerOtaUploadChunk() {
   HTTPUpload& upload = server.upload();
   switch (upload.status) {
     case UPLOAD_FILE_START: {
+      if (getAutoEnabled()) {
+        sWorkerOtaSawFile = true;
+        setWorkerOtaRequestError("AUTO_MODE");
+        sWorkerOtaRequestErrorStatus = 409;
+        return;
+      }
       if (sWorkerOtaSawFile) {
         setWorkerOtaRequestError("multiple_files_not_allowed");
-        workerOtaPackageUploadAbort(sWorkerOtaRequestError);
+        if (sWorkerOtaStarted) {
+          workerOtaPackageUploadAbort(sWorkerOtaRequestError);
+        }
         sWorkerOtaAccepted = false;
         return;
       }
@@ -847,6 +938,7 @@ void handleWorkerOtaUploadChunk() {
       }
       stopManualPump();
       pumpOff();
+      sWorkerOtaStarted = true;
       if (!workerOtaPackageUploadStart()) {
         WorkerOtaStatusSnapshot status{};
         workerOtaGetStatus(status);
@@ -880,8 +972,12 @@ void handleWorkerOtaUploadChunk() {
       break;
 
     case UPLOAD_FILE_ABORTED:
-      setWorkerOtaRequestError("upload_aborted");
-      workerOtaPackageUploadAbort(sWorkerOtaRequestError);
+      if (!sWorkerOtaRequestError[0]) {
+        setWorkerOtaRequestError("upload_aborted");
+      }
+      if (sWorkerOtaStarted) {
+        workerOtaPackageUploadAbort(sWorkerOtaRequestError);
+      }
       sWorkerOtaAccepted = false;
       sWorkerOtaFinished = true;
       break;
@@ -915,17 +1011,26 @@ void handleWorkerOtaRequestComplete() {
   }
   String response;
   serializeJson(doc, response);
-  server.send(succeeded ? 200 : 400, "application/json", response);
+  server.send(succeeded ? 200 : sWorkerOtaRequestErrorStatus,
+              "application/json", response);
 
-  if (!succeeded) workerOtaPackageUploadAbort(sWorkerOtaRequestError);
+  if (!succeeded && sWorkerOtaStarted) {
+    workerOtaPackageUploadAbort(sWorkerOtaRequestError);
+  }
   sWorkerOtaSawFile = false;
+  sWorkerOtaStarted = false;
   sWorkerOtaAccepted = false;
   sWorkerOtaFinished = false;
   sWorkerOtaRequestError[0] = '\0';
+  sWorkerOtaRequestErrorStatus = 400;
 }
 
 void handleWorkerOtaStart() {
   if (server.method() != HTTP_POST) { server.send(405); return; }
+  if (getAutoEnabled()) {
+    server.send(409, "application/json", "{\"error\":\"AUTO_MODE\"}");
+    return;
+  }
   if (otaIsActive() || workerOtaIsActive()) {
     server.send(409, "application/json", "{\"error\":\"OTA_ACTIVE\"}");
     return;
@@ -984,16 +1089,19 @@ void handleOtaRequestComplete() {
   }
   String response;
   serializeJson(doc, response);
-  server.send(succeeded ? 200 : 400, "application/json", response);
+  server.send(succeeded ? 200 : sOtaRequestErrorStatus,
+              "application/json", response);
 
-  if (!succeeded) {
+  if (!succeeded && sOtaStarted) {
     otaReleaseFailedUpload();
     setRuntimeState(getAutoEnabled() ? SLEEPING : READY);
   }
   sOtaSawFile = false;
+  sOtaStarted = false;
   sOtaAccepted = false;
   sOtaFinished = false;
   sOtaRequestError[0] = '\0';
+  sOtaRequestErrorStatus = 400;
 }
 
 void webBegin() {

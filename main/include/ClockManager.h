@@ -28,7 +28,6 @@ bool clockSetUserTimeOfDaySec(uint32_t secOfDay);
 uint32_t clockGetCurrentTimeOfDaySec();
 uint64_t clockGetCurrentEpochSec();
 bool clockIsValid();
-void clockRecordLastWateringNow();
 
 void clockGetStatus(ClockStatusSnapshot& out);
 const char* clockSourceName(ClockSource source);

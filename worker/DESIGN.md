@@ -20,9 +20,11 @@ Goal: As a worker device, it will have a capacitive soil moisture sensor and a s
   - `HW_V2_8POT_REV_A`
     - Pot count: 8
     - Multiplexed soil sensing, shift-register valve control, and separate battery enable/ADC pins
+    - Requires the external 32.768 kHz RTC crystal
   - `HW_V2_8POT_REV_B`
     - Pot count: 8
     - Same general architecture as rev A with alternate pin assignments
+    - Requires the external 32.768 kHz RTC crystal
   - `HW_TARGET_16POT_REV_A`
     - Pot count: 16
     - Multiplexed soil sensing with shift-register valve control
@@ -44,6 +46,7 @@ Goal: As a worker device, it will have a capacitive soil moisture sensor and a s
       - Bluetooth MAC address of main node
       - Soil moisture
       - Battery level
+      - Firmware version
   - Bluetooth
     - Broadcast with ACKs
     - Extended advertising is required
@@ -118,6 +121,11 @@ Worker behavior:
 - Sleep begins only after the sleep-command ACK advertisement is complete.
 - One periodic task samples battery first and soil second every five seconds, publishing
   both through one protected sensor snapshot.
+- Status includes `FIELD_FW_VERSION` (`0x07`) as a big-endian `uint32`.
+
+Worker OTA accepts upgrades and rollbacks at or above the build-defined
+`FW_MIN_ALLOWED_VERSION`. It rejects the currently installed version and any package
+below that floor before firmware image transfer begins.
 
 `TYPE_CONFIG` remains reserved and unused. Bluetooth common and crypto files intentionally
 remain duplicated between the two independently managed firmware directories.
@@ -133,6 +141,49 @@ Examples:
 - `HW_V2_8POT_REV_B` : 8-pot variant with alternate pin assignments
 
 The 16-pot target remains an intentional placeholder with incomplete pin mapping.
+
+## V2 RTC Clock Boot Gate
+
+Both V2 8-pot workers require the external 32.768 kHz crystal as the RTC slow
+clock. ESP-IDF requests that source with 3000 calibration cycles. The application
+then checks the source selected by ESP-IDF at the beginning of `app_main()`, before
+NVS, Arduino, sensors, valves, Bluetooth, or OTA are initialized.
+
+- `SOC_RTC_SLOW_CLK_SRC_XTAL32K` passes the gate and normal startup continues.
+- Any internal or invalid source fails the gate. GPIO8 is configured as the
+  active-low onboard blue LED (low is on; high is off) and displays the RTC
+  fault pattern below.
+- A successful check produces no flash. The LED is explicitly turned off before
+  startup continues, and `sensorBegin()` later takes ownership of GPIO8 as
+  `MUX_SEL_PIN1`. No LED controller writes GPIO8 during normal operation; visible
+  activity caused by multiplexer selection is incidental.
+
+The RTC failure indication uses half-open intervals and is evaluated every 10 ms:
+
+| Cycle interval | LED state |
+|---|---|
+| 0-100 ms | On |
+| 100-200 ms | Off |
+| 200-300 ms | On |
+| 300-400 ms | Off |
+| 400-500 ms | On |
+| 500-2000 ms | Off |
+
+This two-second cycle repeats 30 times, for exactly 60 seconds of fault
+indication. The LED is then turned off and the worker enters timer-only deep sleep
+for five seconds. Deep-sleep wake runs ESP-IDF clock initialization again, which
+re-enables and calibrates the external crystal. A recovered crystal permits normal
+startup; a continuing failure starts another indication and recovery cycle. The
+fallback clock may make the five-second recovery interval imprecise, which is
+acceptable for this retry.
+
+Deep-sleep recovery retains the worker's `RTC_DATA_ATTR` main-device MAC and last
+command ID. The XTAL32K watchdog is configured with a timeout value of 200 and
+automatic backup-clock switching, so a crystal failure during deep sleep switches
+RTC timing to the RC-derived backup and allows the timer wakeup to continue. No
+runtime callback or fault task is installed: if the worker is awake when a failure
+occurs, it may continue temporarily on the backup clock until its next deep-sleep
+wake or reset.
 
 
 

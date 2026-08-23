@@ -30,7 +30,7 @@ Worker device:
 
 - Function:
     - Users add workers to main by Bluetooth MAC address. Main will probe added workers and learn details upon first status report(worker having 1/8/16 ports available)
-    - Users set watering duration and soil moisture threshold for each plant pot, and time range and interval.
+    - Users set watering duration, soil moisture threshold, and automatic watering interval for each plant pot, plus the system-wide active time range and data-sync interval.
     - After enabling auto watering, main collects sensor readings, starts pump and commands workers to trigger solenoid valve, then let workers go to deep sleep mode during time interval to save power.
     - Solenoid valve will be triggered one by one, meaning only one pot will be watered at a single time, due to battery current and pump power limitation.
 
@@ -86,5 +86,4 @@ There are still several minor issues with this version, not function breaking, b
 <img src="img/hw_v2_worker_pcb.png" width="500">
 
 <img src="img/hw_v2_worker.jpg" width="500">
-
 

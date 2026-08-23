@@ -13,13 +13,28 @@
 #include "WateringManager.h"
 #include "OtaManager.h"
 #include "WorkerOtaManager.h"
+#include "AutoRecovery.h"
+#include "AutoWateringPolicy.h"
+#include "StatusLed.h"
 #include "esp_timer.h"
 
 namespace {
 constexpr int64_t MANUAL_SYNC_INTERVAL_US = 30000000LL;
 constexpr uint32_t STATUS_WAIT_MS = 3000;
-constexpr uint32_t AUTO_WAKE_PADDING_MS = 30000;
-constexpr uint16_t TANK_MINIMUM_MV = 2800;
+constexpr uint32_t AUTO_WAKE_PADDING_MS = 10000;
+
+String gMdnsName;
+bool gMdnsStarted = false;
+
+void startMdnsIfNeeded() {
+  if (gMdnsStarted || gMdnsName.isEmpty()) return;
+  if (!MDNS.begin(gMdnsName.c_str())) {
+    LOG("Error starting mDNS");
+    return;
+  }
+  gMdnsStarted = true;
+  LOG("mDNS started: %s.local", gMdnsName.c_str());
+}
 
 struct AutoWaterRequest {
   uint8_t mac[6];
@@ -97,13 +112,7 @@ bool wateringWindowOpen(const Settings& settings) {
          secondOfDay <= settings.activeEnd;
 }
 
-bool wateringCooldownComplete(const Settings& settings, uint64_t nowUtc) {
-  if (settings.lastWateringUtcSec == 0) return true;
-  return nowUtc >= settings.lastWateringUtcSec &&
-         nowUtc - settings.lastWateringUtcSec >= settings.waterInterval;
-}
-
-void waterFreshWorkers(int64_t cycleStartUs) {
+void waterFreshWorkers(int64_t cycleStartUs, uint32_t nowUtc) {
   int count = getWorkerConfigCount();
   LOG("WaterTask watering fresh workers start count=%d", count);
   AutoWaterRequest requests[MAX_WORKER_COUNT] = {};
@@ -131,8 +140,10 @@ void waterFreshWorkers(int64_t cycleStartUs) {
     for (int pot = 0; pot < potCount; ++pot) {
       uint16_t correctedSoil =
           getCorrectedSoilMoisture(node.batteryMv, node.soils[pot]);
-      if (node.soils[pot] > 200 &&
-          correctedSoil > worker.thresholds[pot]) {
+      if (autoWateringPotEligible(
+              nowUtc, worker.lastAutoWateringUtcSec[pot],
+              worker.waterIntervals[pot], node.soils[pot], correctedSoil,
+              worker.thresholds[pot])) {
         request.potMask |= static_cast<uint16_t>(1u << pot);
         request.durations[request.durationCount++] = worker.durations[pot];
       }
@@ -149,7 +160,7 @@ void waterFreshWorkers(int64_t cycleStartUs) {
     LOG("WaterTask watering fresh workers end reason=no_candidates");
     return;
   }
-  if (getTankLevel() <= TANK_MINIMUM_MV) {
+  if (isTankLow()) {
     LOG("WaterTask watering batch rejected reason=tank_low tank_mv=%u",
         static_cast<unsigned>(getTankLevel()));
     return;
@@ -166,18 +177,19 @@ void waterFreshWorkers(int64_t cycleStartUs) {
       static_cast<int64_t>(settings.pumpDelaySeconds) * 1000000LL;
   bool tankLow = false;
   while (esp_timer_get_time() < primeDeadlineUs) {
-    if (getTankLevel() <= TANK_MINIMUM_MV) {
+    if (isTankLow()) {
       tankLow = true;
       break;
     }
     vTaskDelay(pdMS_TO_TICKS(100));
   }
-  if (getTankLevel() <= TANK_MINIMUM_MV) tankLow = true;
+  if (isTankLow()) tankLow = true;
 
-  bool anyCompleted = false;
+  CompletedAutoWatering completions[MAX_WORKER_COUNT] = {};
+  size_t completionCount = 0;
   if (!tankLow) {
     for (int i = 0; i < requestCount; ++i) {
-      if (getTankLevel() <= TANK_MINIMUM_MV) {
+      if (isTankLow()) {
         tankLow = true;
         LOG("WaterTask watering batch abort reason=tank_low index=%d tank_mv=%u",
             i, static_cast<unsigned>(getTankLevel()));
@@ -189,10 +201,17 @@ void waterFreshWorkers(int64_t cycleStartUs) {
       bool completed = wateringExecuteWorker(
           request.mac, request.potMask, request.durations,
           request.durationCount, true);
-      if (completed) anyCompleted = true;
+      if (completed) {
+        if (completionCount < MAX_WORKER_COUNT) {
+          memcpy(completions[completionCount].mac, request.mac,
+                 sizeof(completions[completionCount].mac));
+          completions[completionCount].potMask = request.potMask;
+          ++completionCount;
+        }
+      }
       LOG("WaterTask watering worker=%s completed=%u",
           workerMac, completed ? 1u : 0u);
-      if (getTankLevel() <= TANK_MINIMUM_MV) {
+      if (isTankLow()) {
         tankLow = true;
         LOG("WaterTask watering batch abort reason=tank_low_after_worker worker=%s tank_mv=%u",
             workerMac, static_cast<unsigned>(getTankLevel()));
@@ -206,11 +225,15 @@ void waterFreshWorkers(int64_t cycleStartUs) {
 
   LOG("WaterTask watering pump stop");
   pumpOff();
-  if (anyCompleted) {
-    clockRecordLastWateringNow();
+  if (completionCount != 0) {
+    uint64_t completedUtc = clockGetCurrentEpochSec();
+    if (completedUtc != 0 && completedUtc <= UINT32_MAX) {
+      recordCompletedAutoWateringBatch(
+          completions, completionCount, static_cast<uint32_t>(completedUtc));
+    }
   }
   LOG("WaterTask watering fresh workers end completed=%u tank_low=%u",
-      anyCompleted ? 1u : 0u, tankLow ? 1u : 0u);
+      completionCount != 0 ? 1u : 0u, tankLow ? 1u : 0u);
 }
 
 void sendWorkerToSleepAt(const uint8_t mac[6], int64_t wakeAtUs) {
@@ -350,14 +373,12 @@ void TaskWatering(void*) {
     uint64_t nowUtc = clockGetCurrentEpochSec();
     bool clockOk = clockIsValid() && nowUtc != 0;
     bool windowOpen = clockOk && wateringWindowOpen(settings);
-    bool cooldownComplete = clockOk && wateringCooldownComplete(settings, nowUtc);
-    LOG("WaterTask auto watering gate utc=%lu window_open=%u cooldown_complete=%u",
-        static_cast<unsigned long>(nowUtc), windowOpen ? 1u : 0u,
-        cooldownComplete ? 1u : 0u);
-    if (clockOk && windowOpen && cooldownComplete) {
+    LOG("WaterTask auto watering gate utc=%lu window_open=%u",
+        static_cast<unsigned long>(nowUtc), windowOpen ? 1u : 0u);
+    if (clockOk && windowOpen && nowUtc <= UINT32_MAX) {
       if (otaIsActive() || workerOtaIsActive()) continue;
       setRuntimeState(WATERING);
-      waterFreshWorkers(cycleStartUs);
+      waterFreshWorkers(cycleStartUs, static_cast<uint32_t>(nowUtc));
     } else {
       LOG("WaterTask auto watering skipped");
     }
@@ -374,27 +395,43 @@ void TaskWatering(void*) {
 
 void setup() {
   Serial.begin(115200);
+  bool resumeAutoAfterCrash = autoRecoveryInitialize();
   otaManagerInit();
   workerOtaManagerInit();
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
+  statusLedBegin();
   vTaskDelay(pdMS_TO_TICKS(3000));
   char btmac[13];
   getBtMacHex(btmac);
   LOG("Bluetooth MAC address: %s", btmac);
 
+  char wifiLast6[7];
+  getWifiMacLast6Hex(wifiLast6);
+  gMdnsName = String("plant-watering-") + wifiLast6;
+
   loadSettings();
   clockManagerInit();
 
   WiFiProvisioner provisioner;
+  WiFiProvisioner::Config &config = provisioner.getConfig();
+  config.PROJECT_TITLE = "Plant Watering";
+  config.AP_NAME = gMdnsName.c_str();
   provisioner.onSuccess([](const char* ssid, const char* password, const char*) {
     saveWifiCred(ssid, password);
   });
   provisioner.getConfig().SHOW_INPUT_FIELD = false;
   provisioner.getConfig().SHOW_RESET_FIELD = false;
 
-  if (!connectToWiFi()) {
+  WiFiStartupResult wifiResult = connectToWiFi();
+  bool bootOfflineForRecovery =
+      resumeAutoAfterCrash &&
+      wifiResult == WiFiStartupResult::CONNECTION_FAILED;
+  if (wifiResult != WiFiStartupResult::CONNECTED &&
+      !bootOfflineForRecovery) {
     provisioner.startProvisioning();
     while (WiFi.status() != WL_CONNECTED) delay(500);
+  } else if (bootOfflineForRecovery) {
+    LOG("Crash recovery continuing offline; WiFi will retry in background");
   }
   initializeWiFiMaintenance();
   clockRequestNtpSync();
@@ -403,15 +440,7 @@ void setup() {
   sensorBegin();
   wateringManagerInit();
   btMainBegin();
-
-  char wifiLast6[7];
-  getWifiMacLast6Hex(wifiLast6);
-  String mdnsName = String("plant-watering-") + wifiLast6;
-	if (!MDNS.begin(mdnsName.c_str())) {
-		LOG("Error starting mDNS");
-	} else {
-		LOG("mDNS started: %s.local", mdnsName.c_str());
-	}
+  startMdnsIfNeeded();
 
   webBegin();
   TaskHandle_t webTask = nullptr;
@@ -425,10 +454,15 @@ void setup() {
   xTaskCreate(TaskWeb, "webTask", 6144, nullptr, 1, &webTask);
   webSetDiagnosticsTaskHandles(xTaskGetCurrentTaskHandle(), webTask,
                                sensorTask, wateringTask);
+  if (resumeAutoAfterCrash) {
+    LOG("Restoring auto mode after eligible crash/watchdog reset");
+    setAutoEnabled(true);
+  }
 }
 
 void loop() {
-  serviceWiFiMaintenance();
+  bool wifiReconnected = serviceWiFiMaintenance();
+  if (wifiReconnected && !gMdnsStarted) startMdnsIfNeeded();
   clockManagerLoop();
   otaManagerLoop();
   workerOtaManagerLoop();

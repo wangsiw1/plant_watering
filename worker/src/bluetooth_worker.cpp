@@ -17,6 +17,10 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#ifndef FW_VERSION
+#error "FW_VERSION must be supplied by PlatformIO build_flags"
+#endif
+
 using namespace BT_TLV;
 
 namespace {
@@ -383,7 +387,8 @@ void btWorkerAdvertiseStatus() {
   BtBodyBuilder body;
   btBodyBegin(body, TYPE_STATUS);
   if (!btTlvAppendU16(body, FIELD_BATT, snapshot.batteryMv) ||
-      !btTlvAppendU8(body, FIELD_POT_COUNT, WORKER_POT_COUNT)) {
+      !btTlvAppendU8(body, FIELD_POT_COUNT, WORKER_POT_COUNT) ||
+      !btTlvAppendU32(body, FIELD_FW_VERSION, FW_VERSION)) {
     LOG("BT worker status build failed reason=header");
     return;
   }
@@ -401,9 +406,10 @@ void btWorkerAdvertiseStatus() {
   if (!copyMainMac(target)) memcpy(target, BROADCAST_MAC, 6);
   char targetText[13];
   macToHexLower(target, targetText);
-  LOG("BT worker status send target=%s pots=%u batt_mv=%u",
+  LOG("BT worker status send target=%s pots=%u batt_mv=%u fw_version=%lu",
       targetText, static_cast<unsigned>(WORKER_POT_COUNT),
-      static_cast<unsigned>(snapshot.batteryMv));
+      static_cast<unsigned>(snapshot.batteryMv),
+      static_cast<unsigned long>(FW_VERSION));
   // Detailed value log for future debugging:
   // for (size_t i = 0; i < WORKER_POT_COUNT; ++i) LOG("BT worker status soil[%u]=%u", i, snapshot.soils[i]);
   BtSendResult result = btCommonSendCommand(target, body.data, body.len, 2, 700);

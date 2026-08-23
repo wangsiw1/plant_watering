@@ -1,6 +1,7 @@
 #include "OtaManager.h"
 
 #include "FirmwarePackage.h"
+#include "FirmwareVersionPolicy.h"
 #include "ClockManager.h"
 #include "Utility.h"
 
@@ -13,6 +14,18 @@
 
 #ifndef FW_VERSION
 #error "FW_VERSION must be supplied by PlatformIO build_flags"
+#endif
+
+#ifndef FW_MIN_ALLOWED_VERSION
+#error "FW_MIN_ALLOWED_VERSION must be supplied by PlatformIO build_flags"
+#endif
+
+#if FW_MIN_ALLOWED_VERSION < 1
+#error "FW_MIN_ALLOWED_VERSION must be greater than zero"
+#endif
+
+#if FW_MIN_ALLOWED_VERSION > FW_VERSION
+#error "FW_MIN_ALLOWED_VERSION must not exceed FW_VERSION"
 #endif
 
 #ifndef FW_HARDWARE_TARGET
@@ -194,6 +207,18 @@ bool parsePackageHeader() {
   if (error != FirmwarePackage::ParseError::NONE) {
     fail(FirmwarePackage::parseErrorName(error));
     return false;
+  }
+  switch (firmwareVersionDecision(FW_VERSION,
+                                  gParsedHeader.firmwareVersion,
+                                  FW_MIN_ALLOWED_VERSION)) {
+    case FirmwareVersionDecision::ALREADY_INSTALLED:
+      fail("already_up_to_date");
+      return false;
+    case FirmwareVersionDecision::BELOW_MINIMUM:
+      fail("version_below_minimum");
+      return false;
+    case FirmwareVersionDecision::ALLOW:
+      break;
   }
   if (gParsedHeader.imageSize < IMAGE_PREFIX_SIZE) {
     fail("image_too_small");

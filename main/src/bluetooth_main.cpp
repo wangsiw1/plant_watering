@@ -73,12 +73,14 @@ bool acceptMessageId(const uint8_t mac[6], const BtMessageId& id) {
 }
 
 void updateStatus(const uint8_t mac[6], const uint16_t* soils,
-                  uint8_t potCount, uint16_t batteryMv, int rssi) {
+                  uint8_t potCount, uint16_t batteryMv,
+                  uint32_t firmwareVersion, int rssi) {
   lockNodes();
   int index = findNodeLocked(mac);
   if (index >= 0) {
     WorkerNode& node = gNodes[index];
     node.batteryMv = batteryMv;
+    node.firmwareVersion = firmwareVersion;
     node.potCount = min(potCount, static_cast<uint8_t>(MAX_POTS_PER_DEVICE));
     memset(node.soils, 0, sizeof(node.soils));
     memcpy(node.soils, soils, node.potCount * sizeof(uint16_t));
@@ -90,9 +92,10 @@ void updateStatus(const uint8_t mac[6], const uint16_t* soils,
   unlockNodes();
   char source[13];
   macToHexLower(mac, source);
-  LOG("BT RX status update source=%s pots=%u batt_mv=%u rssi=%d",
+  LOG("BT RX status update source=%s pots=%u batt_mv=%u fw_version=%lu rssi=%d",
       source, static_cast<unsigned>(potCount),
-      static_cast<unsigned>(batteryMv), rssi);
+      static_cast<unsigned>(batteryMv),
+      static_cast<unsigned long>(firmwareVersion), rssi);
   // Detailed value log for future debugging:
   // for (uint8_t i = 0; i < potCount; ++i) LOG("BT RX status soil[%u]=%u", i, soils[i]);
   ensureWorkerConfigsForMac(mac, potCount);
@@ -114,16 +117,20 @@ void queueSleepRequestIfNeeded(const uint8_t mac[6]) {
 
 bool parseStatusBody(const uint8_t* body, size_t bodyLen,
                      uint16_t soils[MAX_POTS_PER_DEVICE],
-                     uint8_t& potCount, uint16_t& batteryMv) {
+                     uint8_t& potCount, uint16_t& batteryMv,
+                     uint32_t& firmwareVersion) {
   if (!body || bodyLen < 1 || body[0] != TYPE_STATUS) return false;
   const uint8_t* tlvs = body + 1;
   size_t tlvsLen = bodyLen - 1;
   const uint8_t* soilBytes = nullptr;
   uint8_t soilBytesLen = 0;
+  bool hasFirmwareVersion = false;
   if (!btTlvReadRequiredU16(tlvs, tlvsLen, FIELD_BATT, batteryMv) ||
       !btTlvReadRequiredU8(tlvs, tlvsLen, FIELD_POT_COUNT, potCount) ||
       !btTlvReadRequiredBytes(tlvs, tlvsLen, FIELD_SOIL_LIST,
                               soilBytes, soilBytesLen) ||
+      !btTlvReadOptionalU32(tlvs, tlvsLen, FIELD_FW_VERSION,
+                            firmwareVersion, hasFirmwareVersion) ||
       potCount == 0 || potCount > MAX_POTS_PER_DEVICE ||
       soilBytesLen != static_cast<uint8_t>(potCount * 2u)) {
     return false;
@@ -186,7 +193,9 @@ void parseAdvert(const uint8_t* data, size_t len, const NimBLEAdvertisedDevice* 
     uint16_t soils[MAX_POTS_PER_DEVICE] = {};
     uint8_t potCount = 0;
     uint16_t batteryMv = 0;
-    if (!parseStatusBody(body, bodyLen, soils, potCount, batteryMv)) {
+    uint32_t firmwareVersion = 0;
+    if (!parseStatusBody(body, bodyLen, soils, potCount, batteryMv,
+                         firmwareVersion)) {
       LOG("BT RX drop reason=invalid_status source=%s id=%08lx%08lx:%lu",
           source, static_cast<unsigned long>(messageId.sessionId >> 32),
           static_cast<unsigned long>(messageId.sessionId & 0xFFFFFFFFULL),
@@ -201,7 +210,8 @@ void parseAdvert(const uint8_t* data, size_t len, const NimBLEAdvertisedDevice* 
           static_cast<unsigned long>(messageId.sequence));
       return;
     }
-    updateStatus(sourceMac, soils, potCount, batteryMv, adv->getRSSI());
+    updateStatus(sourceMac, soils, potCount, batteryMv, firmwareVersion,
+                 adv->getRSSI());
     queueSleepRequestIfNeeded(sourceMac);
     return;
   }

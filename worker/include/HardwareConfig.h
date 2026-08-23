@@ -12,6 +12,8 @@
 #define VALVE_PIN 1
 #define BATT_PIN 4
 
+#define WORKER_REQUIRES_EXT_RTC_XTAL 0
+
 #elif defined(HW_V2_8POT_REV_A)
 
 #define WORKER_POT_COUNT 8
@@ -21,6 +23,10 @@
 #define MUX_SEL_PIN0 2
 #define MUX_SEL_PIN1 8
 #define MUX_SEL_PIN2 9
+
+#define WORKER_REQUIRES_EXT_RTC_XTAL 1
+#define WORKER_BOOT_LED_PIN 8
+#define WORKER_BOOT_LED_ACTIVE_LOW 1
 
 #define SHIFT_DATA_PIN 10
 #define SHIFT_CLOCK_PIN 20
@@ -40,6 +46,10 @@
 #define MUX_SEL_PIN0 2
 #define MUX_SEL_PIN1 8
 #define MUX_SEL_PIN2 9
+
+#define WORKER_REQUIRES_EXT_RTC_XTAL 1
+#define WORKER_BOOT_LED_PIN 8
+#define WORKER_BOOT_LED_ACTIVE_LOW 1
 
 #define SHIFT_DATA_PIN 10
 #define SHIFT_CLOCK_PIN 20
@@ -61,6 +71,8 @@
 #define SHIFT_CLOCK_PIN 10
 #define SHIFT_LATCH_PIN 11
 #define BATT_PIN 4
+
+#define WORKER_REQUIRES_EXT_RTC_XTAL 0
 
 #else
 #error "Please define one HW_TARGET_* build flag (e.g. HW_V1_1POT_REV_A)"

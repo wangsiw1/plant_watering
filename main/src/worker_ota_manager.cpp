@@ -146,6 +146,7 @@ const char* remoteErrorName(uint8_t error) {
     case 11: return "Worker image validation failed";
     case 12: return "Worker boot partition select failed";
     case 13: return "Worker OTA aborted";
+    case 14: return "version_below_minimum";
     default: return "Worker OTA failed";
   }
 }
@@ -256,8 +257,8 @@ bool deployToWorker(const uint8_t mac[6], const FirmwarePackage::Header& header)
     setFailure("Wrong hardware target");
     goto done;
   }
-  if (header.firmwareVersion <= info.currentVersion) {
-    setFailure("Firmware is already up to date");
+  if (header.firmwareVersion == info.currentVersion) {
+    setFailure("already_up_to_date");
     goto done;
   }
   if (info.otaSlotSize == 0) {

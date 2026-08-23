@@ -5,6 +5,7 @@
 #include "Valve.h"
 #include "Battery.h"
 #include "WorkerOtaService.h"
+#include "WorkerBootClock.h"
 
 // Default periodic status interval (seconds) while not connected to main
 static const uint32_t STATUS_INTERVAL = 10;
@@ -21,6 +22,7 @@ void TaskSensors(void *pvParameters) {
 void setup() {
 	Serial.begin(115200);
 	// analogSetAttenuation(ADC_11db);
+    valveBegin();
 	vTaskDelay(pdMS_TO_TICKS(3000));
 	char btmac[13]; getBtMacHex(btmac);
 	LOG("Bluetooth MAC address: %s", btmac);
@@ -30,7 +32,6 @@ void setup() {
 	
     battBegin();
     sensorBegin();
-    valveBegin();
     readWorkerSensors();
 
 	btWorkerBegin();
@@ -57,6 +58,8 @@ void loop() {
 // If you are using C++ (which you are for NimBLE), 
 // app_main must be declared with extern "C"
 extern "C" void app_main() {
+	workerBootRtcClockGate();
+
 	esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

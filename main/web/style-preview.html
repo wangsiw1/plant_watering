@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Plant Watering – Complete Style Preview</title>
+<style>
+*{box-sizing:border-box}
+body{font:15px system-ui,sans-serif;max-width:900px;margin:auto;padding:16px;line-height:1.4}
+h2{margin:8px 0 18px}h3{margin:0 0 12px;padding-bottom:6px;border-bottom:1px solid #ddd}
+section{margin:14px 0;padding:16px;border:1px solid #ddd;border-radius:9px}
+.status-row{display:grid;grid-template-columns:180px 1fr;gap:10px;margin:8px 0}.status-label,label,.meta{color:#666}label{pointer-events:none}
+.field{display:flex;align-items:center;gap:10px;margin:8px 0}.field label{flex:0 0 180px}
+.field input:not([type=checkbox]),.field select{width:100%;max-width:380px}.field.short input{max-width:140px}.field.medium input,.field.medium select{max-width:260px}
+.field-row,.actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px}.field-row .field{margin:4px 0}.field.compact label{flex:0 0 auto}
+input,select,button{font:inherit;padding:8px;border:1px solid #bbb;border-radius:6px;background:#fff}input:focus,select:focus{outline:2px solid #78a985}
+button{border-color:#287a43;background:#287a43;color:#fff;cursor:pointer}button.secondary{background:#fff;color:#287a43}button.danger{border-color:#b42318;background:#b42318}button.secondary.danger{background:#fff;color:#b42318}button:disabled{opacity:.5;cursor:default}
+.actions{margin-top:10px}.reset-actions{margin-top:22px;padding-top:12px;border-top:1px solid #ddd}.badge{display:inline-block;justify-self:start;padding:2px 8px;border-radius:20px;background:#e2f2e6;color:#17602d;font-weight:600}
+.worker{margin-top:14px;padding-top:12px;border-top:1px solid #ccc}.pot{margin:10px 0 0 18px;padding:10px;border-left:3px solid #b8d5bf;background:#fafafa}.pot-title{margin-bottom:6px}
+table{width:100%;border-collapse:collapse}th,td{padding:7px;border:1px solid #ddd;text-align:left}th{background:#f5f5f5}.table-wrap{overflow-x:auto}
+a{color:#1769aa}@media(max-width:600px){body{padding:10px}section{padding:12px}.status-row{grid-template-columns:1fr;gap:1px}.field,.field-row{display:block}.field label{display:block;margin-bottom:4px}.field input:not([type=checkbox]),.field select,.field.short input,.field.medium input,.field.medium select{max-width:none}.field-row .field{margin:8px 0}.pot{margin-left:0}.actions button{min-height:42px}}
+</style>
+</head>
+<body>
+<h2>Plant Watering</h2>
+
+<section>
+  <h3>Status</h3>
+  <div class="status-row"><span class="status-label">Current time (HH:MM)</span><span>14:32 (UTC+08:00, NTP)</span></div>
+  <div class="status-row"><span class="status-label">Uptime (HH:MM)</span><span>03:18</span></div>
+  <div class="status-row"><span class="status-label">Water tank level</span><span>78%</span></div>
+  <div class="status-row"><span class="status-label">System status</span><span class="badge">Ready</span></div>
+  <div class="status-row"><span class="status-label">Auto mode</span><span>Enabled</span></div>
+  <div class="status-row"><span class="status-label">Data sync interval (s)</span><span>300</span></div>
+  <div class="status-row"><span class="status-label">Last data sync cycle</span><span>18 seconds ago</span></div>
+  <div class="status-row"><span class="status-label">Next data sync cycle</span><span>in 4 minutes</span></div>
+  <div class="actions"><button>Start Pump (max 10s)</button></div>
+</section>
+
+<section>
+  <h3>Settings</h3>
+  <div class="field"><label for="name">Name</label><input id="name" value="Balcony garden"></div>
+  <div class="field medium"><label for="language">Language</label><select id="language"><option>English</option><option>简体中文</option></select></div>
+  <div class="field short"><label for="current-time">Current time (HH:MM)</label><input id="current-time" type="time" value="14:32"></div>
+  <div class="field medium"><label for="timezone">Timezone offset (±HH:MM)</label><select id="timezone"><option>UTC+08:00</option></select></div>
+  <div class="field short"><label for="active-start">Active start (HH:MM)</label><input id="active-start" type="time" value="07:00"></div>
+  <div class="field short"><label for="active-end">Active end (HH:MM)</label><input id="active-end" type="time" value="21:00"></div>
+  <div class="actions"><button class="secondary">Sync time (NTP)</button><span class="meta">Clock synchronized</span></div>
+  <div class="field medium"><label for="sync-interval">Data sync interval (s)</label><input id="sync-interval" type="number" value="300"></div>
+  <div class="field short"><label for="pump-delay">Pump activation delay (s)</label><input id="pump-delay" type="number" value="2"></div>
+  <div class="field short"><label for="pump-timeout">Manual pump timeout (s)</label><input id="pump-timeout" type="number" value="10"></div>
+  <div class="field short"><label for="auto-mode">Auto</label><input id="auto-mode" type="checkbox" checked></div>
+  <div class="actions"><button>Apply Settings</button><span class="meta">No pending changes</span></div>
+  <div class="actions reset-actions"><button class="secondary danger">Clear WiFi Credentials</button><button class="danger">Reset All Settings</button></div>
+</section>
+
+<section>
+  <h3>Workers</h3>
+  <form onsubmit="return false">
+    <div class="field medium"><label for="worker-mac">MAC (hex)</label><input id="worker-mac" placeholder="AABBCCDDEEFF" maxlength="12"></div>
+    <div class="field"><label for="worker-new-name">Name</label><input id="worker-new-name" placeholder="Worker name (64 UTF-8 bytes max)"></div>
+    <div class="actions"><button>Add Worker</button></div>
+  </form>
+</section>
+
+<section>
+  <h3>Worker list (2/8)</h3>
+  <div class="actions"><button>Apply All</button></div>
+
+  <div class="worker">
+    <div><strong>1. AABBCCDDEE01</strong></div>
+    <div class="field"><label for="worker-name-1">Worker name</label><input id="worker-name-1" value="Living room"></div>
+    <div class="meta">Battery: 92% · Last sync: 18 seconds ago · RSSI: −54 dBm</div>
+    <div class="actions"><button>Apply</button><button class="secondary danger">Remove</button></div>
+
+    <div class="pot">
+      <div class="pot-title"><strong>Pot 1</strong></div>
+      <div class="field-row">
+        <div class="field compact"><label for="pot-name-1">Name</label><input id="pot-name-1" value="Monstera"></div>
+        <div class="field short compact"><label for="threshold-1">Threshold</label><input id="threshold-1" type="number" value="1450"></div>
+        <div class="field short compact"><label for="duration-1">Duration</label><input id="duration-1" type="number" value="8"></div>
+        <div class="field medium compact"><label for="water-interval-1">Automatic watering interval (s)</label><input id="water-interval-1" type="number" value="3600"></div>
+      </div>
+      <div class="meta">Soil moisture: 61 · Last automatic watering: 6 hours ago</div>
+      <div class="actions"><button class="secondary">Open Valve</button><span class="meta">Ready</span></div>
+    </div>
+
+    <div class="pot">
+      <div class="pot-title"><strong>Pot 2</strong></div>
+      <div class="field-row">
+        <div class="field compact"><label for="pot-name-2">Name</label><input id="pot-name-2" value="Fern"></div>
+        <div class="field short compact"><label for="threshold-2">Threshold</label><input id="threshold-2" type="number" value="1650"></div>
+        <div class="field short compact"><label for="duration-2">Duration</label><input id="duration-2" type="number" value="6"></div>
+        <div class="field medium compact"><label for="water-interval-2">Automatic watering interval (s)</label><input id="water-interval-2" type="number" value="86400"></div>
+      </div>
+      <div class="meta">Soil moisture: sensor not connected · Last automatic watering: 1 day ago</div>
+      <div class="actions"><button class="secondary" disabled>Open Valve</button><span class="meta">Unavailable</span></div>
+    </div>
+  </div>
+
+  <div class="worker">
+    <div><strong>2. AABBCCDDEE02</strong></div>
+    <div class="field"><label for="worker-name-2">Worker name</label><input id="worker-name-2" value="Balcony"></div>
+    <div class="meta">Battery: 76% · Last sync: 1 minute ago · RSSI: −63 dBm</div>
+    <div class="actions"><button>Apply</button><button class="secondary danger">Remove</button></div>
+
+    <div class="pot">
+      <div class="pot-title"><strong>Pot 1</strong></div>
+      <div class="field-row">
+        <div class="field compact"><label for="pot-name-3">Name</label><input id="pot-name-3" value="Basil"></div>
+        <div class="field short compact"><label for="threshold-3">Threshold</label><input id="threshold-3" type="number" value="1300"></div>
+        <div class="field short compact"><label for="duration-3">Duration</label><input id="duration-3" type="number" value="5"></div>
+      </div>
+      <div class="meta">Soil moisture: 43 · Last water: 12 hours ago</div>
+      <div class="actions"><button class="secondary">Open Valve</button><span class="meta">Ready</span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h3>Diagnostics</h3>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Free heap</td><td>182 KB</td></tr>
+      <tr><td>Minimum free heap</td><td>156 KB</td></tr>
+      <tr><td>Largest free block</td><td>104 KB</td></tr>
+      <tr><td>Total heap</td><td>320 KB</td></tr>
+      <tr><td>Loop task stack minimum free</td><td>3240</td></tr>
+      <tr><td>Web task stack minimum free</td><td>2816</td></tr>
+      <tr><td>Sensor task stack minimum free</td><td>2140</td></tr>
+      <tr><td>Watering task stack minimum free</td><td>2632</td></tr>
+      <tr><td>Bluetooth task stack minimum free</td><td>1984</td></tr>
+      <tr><td>Free sketch space</td><td>1,504 KB</td></tr>
+      <tr><td>Sketch size</td><td>1,271 KB</td></tr>
+      <tr><td>Flash chip size</td><td>4,096 KB</td></tr>
+      <tr><td>Chip revision</td><td>4</td></tr>
+      <tr><td>NVS entries used</td><td>42</td></tr>
+      <tr><td>NVS entries total</td><td>756</td></tr>
+      <tr><td>WiFi RSSI</td><td>−51 dBm</td></tr>
+    </table>
+  </div>
+</section>
+
+<p><a href="#">Debug</a> | <a href="#">Firmware Update</a></p>
+<p class="meta">Static preview only · all controls are intentionally inactive</p>
+</body>
+</html>

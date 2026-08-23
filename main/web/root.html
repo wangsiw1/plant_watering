@@ -3,140 +3,136 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Plant Watering</title>
+<title data-i18n="app.title">Plant Watering</title>
 <style>
-    body{font-family:Arial,Helvetica,sans-serif;margin:8px}
-    div{margin-top:6px}
-    button{padding:6px 10px;margin-top:6px; margin-left:6px}
-    table{border-collapse:collapse;width:100%}
-th,td{border:1px solid #ddd;padding:6px;text-align:left}
-.field{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px}
-.field label{flex:0 0 150px}
-.field input:not([type="checkbox"]),.field select{box-sizing:border-box;width:100%;max-width:var(--field-width,240px)}
-.field.short{--field-width:120px}
-.field.medium{--field-width:240px}
-.field.long{--field-width:380px}
+*{box-sizing:border-box}
+body{font:15px system-ui,sans-serif;max-width:900px;margin:auto;padding:16px;line-height:1.4}
+h2{margin:8px 0 18px}h3{margin:0 0 12px;padding-bottom:6px;border-bottom:1px solid #ddd}
+section{margin:14px 0;padding:16px;border:1px solid #ddd;border-radius:9px}
+.status-row{display:grid;grid-template-columns:180px 1fr;gap:10px;margin:8px 0}.status-label,label,.meta{color:#666}label{pointer-events:none}
+.field{display:flex;align-items:center;gap:10px;margin:8px 0}.field label{flex:0 0 180px}
+.field input:not([type="checkbox"]),.field select{width:100%;max-width:380px}.field.short input{max-width:140px}.field.medium input,.field.medium select{max-width:260px}
+.field-row,.actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px}.field-row .field{margin:4px 0}
 .field.compact label{flex:0 0 auto}
-.field-row{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;margin-top:6px}
-.field-row .field{margin-top:0}
-.actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
-.actions button{margin-left:0}
-.meta{color:#666}
-.status-row{display:flex;align-items:baseline;gap:8px;margin-top:10px}
-.status-label{flex:0 0 150px}
-/* pot rows are indented to visually separate from worker headers */
-.pot{margin-left:18px;padding-left:8px;border-left:2px solid #eee;background:#fafafa}
-@media (max-width:600px){
-    .field{display:block}
-    .field label{display:block;margin-bottom:3px}
-    .field input:not([type="checkbox"]),.field select{max-width:none}
-    .field-row{display:block}
-    .field-row .field{margin-top:6px}
-    .pot{margin-left:0}
-    .status-row{display:block}
-    .status-label{display:block;margin-bottom:3px}
-}
+input,select,button{font:inherit;padding:8px;border:1px solid #bbb;border-radius:6px;background:#fff}input:focus,select:focus{outline:2px solid #78a985}
+button{border-color:#287a43;background:#287a43;color:#fff;cursor:pointer}button.secondary{background:#fff;color:#287a43}button.danger{border-color:#b42318;background:#b42318}button.secondary.danger{background:#fff;color:#b42318}button:disabled{opacity:.5;cursor:default}
+.actions{margin-top:10px}.reset-actions{margin-top:22px;padding-top:12px;border-top:1px solid #ddd}.badge{display:inline-block;justify-self:start;padding:2px 8px;border-radius:20px;background:#e2f2e6;color:#17602d;font-weight:600}
+.worker{margin-top:14px;padding-top:12px;border-top:1px solid #ccc}.pot{margin:10px 0 0 18px;padding:10px;border-left:3px solid #b8d5bf;background:#fafafa}.pot-title{margin-bottom:6px}
+table{width:100%;border-collapse:collapse}th,td{padding:7px;border:1px solid #ddd;text-align:left}th{background:#f5f5f5}.table-wrap{overflow-x:auto}
+a{color:#1769aa}@media(max-width:600px){body{padding:10px}section{padding:12px}.status-row{grid-template-columns:1fr;gap:1px}.field,.field-row{display:block}.field label{display:block;margin-bottom:4px}.field input:not([type="checkbox"]),.field select,.field.short input,.field.medium input,.field.medium select{max-width:none}.field-row .field{margin:8px 0}.pot{margin-left:0}.actions button{min-height:42px}}
 </style>
 </head>
 <body>
 <h2 id="title">Plant Watering</h2>
-<h3>Status</h3>
+<section>
+<h3 data-i18n="main.sectionStatus">Status</h3>
 <div>
-    <div class="status-row"><span class="status-label">Current time (HH:MM)</span><span><span id="time">-</span> (<span id="timezone">-</span>, <span id="clockSource">-</span>)</span></div>
-    <div class="status-row"><span class="status-label">Water tank level</span><span id="tank">-</span></div>
-    <div class="status-row"><span class="status-label">System status</span><span id="status">-</span></div>
-    <div class="status-row"><span class="status-label">Auto mode</span><span id="auto">-</span></div>
-    <div class="status-row"><span class="status-label">Water interval (s)</span><span id="wint">-</span></div>
-    <div class="status-row"><span class="status-label">Data sync interval (s)</span><span id="dsint">-</span></div>
-    <div class="status-row"><span class="status-label">Last data sync cycle</span><span id="lastDataSync">-</span></div>
-    <div class="status-row"><span class="status-label">Next data sync cycle</span><span id="nextDataSync">-</span></div>
-    <div class="status-row"><span class="status-label">Last auto watering</span><span id="last">-</span></div>
+    <div class="status-row"><span class="status-label" data-i18n="field.currentTime">Current time (HH:MM)</span><span><span id="time">-</span> (<span id="timezone">-</span>, <span id="clockSource">-</span>)</span></div>
+    <div class="status-row"><span class="status-label" data-i18n="status.uptime">Uptime (HH:MM)</span><span id="uptime">-</span></div>
+    <div class="status-row"><span class="status-label" data-i18n="status.tank">Water tank level</span><span id="tank">-</span></div>
+    <div class="status-row"><span class="status-label" data-i18n="status.system">System status</span><span id="status" class="badge">-</span></div>
+    <div class="status-row"><span class="status-label" data-i18n="status.autoMode">Auto mode</span><span id="auto">-</span></div>
+    <div class="status-row"><span class="status-label" data-i18n="field.dataSyncInterval">Data sync interval (s)</span><span id="dsint">-</span></div>
+    <div class="status-row"><span class="status-label" data-i18n="status.lastDataSync">Last data sync cycle</span><span id="lastDataSync">-</span></div>
+    <div class="status-row"><span class="status-label" data-i18n="status.nextDataSync">Next data sync cycle</span><span id="nextDataSync">-</span></div>
 </div>
 <div>
     <button id="pumpBtn" onclick="togglePump()">Start Pump (max 10s)</button>
+    <span id="pumpStatus" class="meta"></span>
 </div>
+</section>
 
-<h3>Settings</h3>
+<section>
+<h3 data-i18n="main.sectionSettings">Settings</h3>
 <div class="field long">
-    <label for="name">Name</label>
-    <input id="name" maxlength="64" placeholder="Main controller name (64 UTF-8 bytes max)" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji.">
+    <label for="name" data-i18n="common.name">Name</label>
+    <input id="name" maxlength="64" placeholder="Main controller name (64 UTF-8 bytes max)" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji." data-i18n-placeholder="main.mainNamePlaceholder" data-i18n-title="main.nameHelp">
+</div>
+<div class="field medium">
+    <label for="language" data-i18n="field.language">Language</label>
+    <select id="language" required>
+        <option value="en" data-i18n="language.en">English</option>
+        <option value="zh-CN" data-i18n="language.zh-CN">简体中文</option>
+    </select>
 </div>
 <div class="field short">
-    <label for="newTime">Current time (HH:MM)</label>
+    <label for="newTime" data-i18n="field.currentTime">Current time (HH:MM)</label>
     <input id="newTime" type="time">
 </div>
 <div class="field medium">
-    <label for="tzOffset">Timezone offset (±HH:MM)</label>
-    <select id="tzOffset" required aria-label="Timezone offset"></select>
+    <label for="tzOffset" data-i18n="field.timezone">Timezone offset (±HH:MM)</label>
+    <select id="tzOffset" required aria-label="Timezone offset" data-i18n-aria-label="field.timezoneAria"></select>
 </div>
 <div class="field short">
-    <label for="activeStart">Active start (HH:MM)</label>
+    <label for="activeStart" data-i18n="field.activeStart">Active start (HH:MM)</label>
     <input id="activeStart" type="time" required>
 </div>
 <div class="field short">
-    <label for="activeEnd">Active end (HH:MM)</label>
+    <label for="activeEnd" data-i18n="field.activeEnd">Active end (HH:MM)</label>
     <input id="activeEnd" type="time" required>
 </div>
 <div class="actions">
-    <button id="syncTimeBtn" onclick="syncTime()">Sync time (NTP)</button>
+    <button id="syncTimeBtn" class="secondary" onclick="syncTime()" data-i18n="main.syncTime">Sync time (NTP)</button>
     <span id="syncStatus" style="margin-left:8px"></span>
 </div>
 <div class="field medium">
-    <label for="newWint">Water interval (s)</label>
-    <input id="newWint" type="number" placeholder="60-2419200 (28 days)" min="60" max="2419200" step="1" required>
-</div>
-<div class="field medium">
-    <label for="newDsint">Data sync interval (s)</label>
-    <input id="newDsint" type="number" placeholder="60-2419200 (28 days)" min="60" max="2419200" step="1" required>
+    <label for="newDsint" data-i18n="field.dataSyncInterval">Data sync interval (s)</label>
+    <input id="newDsint" type="number" placeholder="60-2419200 (28 days)" data-i18n-placeholder="placeholder.interval" min="60" max="2419200" step="1" required>
 </div>
 <div class="field short">
-    <label for="newPumpDelay">Pump activation delay (s)</label>
+    <label for="newPumpDelay" data-i18n="field.pumpDelay">Pump activation delay (s)</label>
     <input id="newPumpDelay" type="number" min="0" max="30" step="1" required>
 </div>
 <div class="field short">
-    <label for="newManualPumpTimeout">Manual pump timeout (s)</label>
+    <label for="newManualPumpTimeout" data-i18n="field.manualPumpTimeout">Manual pump timeout (s)</label>
     <input id="newManualPumpTimeout" type="number" min="1" max="60" step="1" required>
 </div>
 <div class="field short">
-    <label for="newAuto">Auto</label>
+    <label for="newAuto" data-i18n="field.auto">Auto</label>
     <input id="newAuto" type="checkbox">
 </div>
 <div class="actions">
-    <button id="applySettingsBtn" onclick="applySettings()">Apply Settings</button>
+    <button id="applySettingsBtn" onclick="applySettings()" data-i18n="main.applySettings">Apply Settings</button>
     <span id="settingsStatus" style="margin-left:8px"></span>
 </div>
-<div class="actions">
-    <button id="clearWifiBtn" onclick="clearWifiCredConfirm()">Clear WiFi Credentials</button>
-    <button id="clearAllBtn" onclick="clearAllSettingsConfirm()" style="margin-left:8px">Reset All Settings</button>
+<div class="actions reset-actions">
+    <button id="clearWifiBtn" class="secondary danger" onclick="clearWifiCredConfirm()" data-i18n="main.clearWifi">Clear WiFi Credentials</button>
+    <button id="clearAllBtn" class="danger" onclick="clearAllSettingsConfirm()" data-i18n="main.resetAll">Reset All Settings</button>
     <span id="wifiStatus" style="margin-left:8px"></span>
     <span id="resetStatus" style="margin-left:8px"></span>
 </div>
+</section>
 
-<h3>Workers</h3>
+<section>
+<h3 data-i18n="main.sectionWorkers">Workers</h3>
 <div>
     <form id="addForm" onsubmit="return false;">
-        <div class="field medium"><label for="wmac">MAC (hex)</label><input id="wmac" placeholder="AABBCCDDEEFF" maxlength="12" pattern="[0-9A-Fa-f]{12}" autocomplete="off" spellcheck="false" required></div>
-        <div class="field long"><label for="wname">Name</label><input id="wname" maxlength="64" placeholder="Worker name (64 UTF-8 bytes max)" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji."></div>
+        <div class="field medium"><label for="wmac" data-i18n="field.macHex">MAC (hex)</label><input id="wmac" placeholder="AABBCCDDEEFF" maxlength="12" pattern="[0-9A-Fa-f]{12}" autocomplete="off" spellcheck="false" required></div>
+        <div class="field long"><label for="wname" data-i18n="common.name">Name</label><input id="wname" maxlength="64" placeholder="Worker name (64 UTF-8 bytes max)" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji." data-i18n-placeholder="main.workerNamePlaceholder" data-i18n-title="main.nameHelp"></div>
         <!-- Threshold and duration removed from quick add; defaults used -->
-    <div class="actions"><button onclick="addWorker()">Add Worker</button></div>
+    <div class="actions"><button onclick="addWorker()" data-i18n="main.addWorker">Add Worker</button></div>
     </form>
 </div>
+</section>
+<section>
 <h3 id="workerListHeader">Worker list (-/-)</h3>
 <div style="margin-top:8px">
     <div class="actions">
-    <button id="applyAllBtn" onclick="applyAll()" disabled>Apply All</button>
+    <button id="applyAllBtn" onclick="applyAll()" disabled data-i18n="main.applyAll">Apply All</button>
     </div>
     <div id="workersList">Loading...</div>
 </div>
+</section>
 
-<div id="diagnosticsSection" style="margin-top:18px;">
-    <h3>Diagnostics</h3>
-    <table id="diagTable"><tr><th>Metric</th><th>Value</th></tr></table>
-</div>
+<section id="diagnosticsSection">
+    <h3 data-i18n="diagnostics.section">Diagnostics</h3>
+    <div class="table-wrap"><table id="diagTable"><tr><th data-i18n="diagnostics.metric">Metric</th><th data-i18n="common.value">Value</th></tr></table></div>
+</section>
 
-<div><a href="/?debug=true">Debug</a> | <a href="/ota">Firmware Update</a></div>
+<div><a href="/?debug=true" data-i18n="common.debug">Debug</a> | <a href="/ota" data-i18n="main.firmwareUpdate">Firmware Update</a></div>
 
 <script>
+/*__I18N_MESSAGES__*/
 const dirty = new Set();
 const pending = new Set();
 const NAME_MAX_BYTES = 64;
@@ -146,8 +142,59 @@ const debugMode = urlParams.get('debug') === 'true';
 let autoMode = false;
 let manualPumpActive = false;
 let manualPumpTimeout = 10;
+let tankSafe = false;
 let settingsInputsLoaded = false;
 let maxWorkerCount = 8;
+let currentWorkerCount = 0;
+let currentLanguage = 'en';
+let pageBootstrapped = false;
+
+function hasTranslation(key, language = currentLanguage) {
+    return Object.prototype.hasOwnProperty.call(I18N_MESSAGES[language] || {}, key);
+}
+
+function t(key, values = {}) {
+    const catalog = I18N_MESSAGES[currentLanguage] || I18N_MESSAGES.en;
+    let text = catalog[key] ?? I18N_MESSAGES.en[key] ?? key;
+    return text.replace(/\{(\w+)\}/g, (match, name) =>
+        Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match);
+}
+
+function applyStaticTranslations() {
+    document.querySelectorAll('[data-i18n]').forEach(element => {
+        element.textContent = t(element.dataset.i18n);
+    });
+    for (const attribute of ['placeholder', 'title', 'aria-label']) {
+        const dataName = 'i18n' + attribute.split('-').map(part =>
+            part.charAt(0).toUpperCase() + part.slice(1)).join('');
+        document.querySelectorAll(`[data-i18n-${attribute}]`).forEach(element => {
+            element.setAttribute(attribute, t(element.dataset[dataName]));
+        });
+    }
+    document.documentElement.lang = currentLanguage;
+}
+
+function setLanguage(language) {
+    const next = Object.prototype.hasOwnProperty.call(I18N_MESSAGES, language) ? language : 'en';
+    if (currentLanguage === next && document.documentElement.lang === next) return false;
+    currentLanguage = next;
+    const languageInput = document.getElementById('language');
+    if (languageInput) languageInput.value = next;
+    applyStaticTranslations();
+    updateWorkerListHeader(currentWorkerCount);
+    updateManualControls();
+    return true;
+}
+
+function translatedCode(prefix, code, fallback = null) {
+    const key = prefix + String(code || '');
+    return hasTranslation(key) ? t(key) : (fallback || code || '-');
+}
+
+function protocolErrorText(code, fallbackKey) {
+    if (code && hasTranslation('protocol.' + code)) return t('protocol.' + code);
+    return code || (fallbackKey ? t(fallbackKey) : '-');
+}
 
 function clampUtf8Value(value, maxBytes) {
     if (utf8Encoder.encode(value).length <= maxBytes) return value;
@@ -182,8 +229,9 @@ function readIntegerInput(input) {
 }
 
 function updateWorkerListHeader(count) {
+    currentWorkerCount = count;
     const header = document.getElementById('workerListHeader');
-    if (header) header.innerText = `Worker list (${count}/${maxWorkerCount})`;
+    if (header) header.innerText = t('main.workerList', {count, max: maxWorkerCount});
 }
 
 function populateTimezoneOptions() {
@@ -208,10 +256,13 @@ function setWaterButtonBlocked(button, blocked) {
 
 function updateManualControls() {
     const pumpBtn = document.getElementById('pumpBtn');
+    const pumpStatus = document.getElementById('pumpStatus');
     if (pumpBtn) {
-    pumpBtn.disabled = autoMode && !manualPumpActive;
-    pumpBtn.innerText = manualPumpActive ? 'Stop Pump' : `Start Pump (max ${manualPumpTimeout}s)`;
+    pumpBtn.disabled = !manualPumpActive && (autoMode || !tankSafe);
+    pumpBtn.innerText = manualPumpActive ? t('pump.stop') : t('pump.start', {seconds: manualPumpTimeout});
+    pumpBtn.title = !manualPumpActive && !tankSafe ? t('protocol.TANK_UNSAFE') : '';
     }
+    if (pumpStatus) pumpStatus.innerText = !manualPumpActive && !tankSafe ? t('protocol.TANK_UNSAFE') : '';
     document.querySelectorAll('.waterBtn').forEach(btn => {
     const blocked = btn.dataset.manualBlocked === '1';
     btn.disabled = autoMode || blocked;
@@ -279,7 +330,8 @@ function getNodePayloadEl(el){
     potIndex: Number(el.dataset.pi),
     name: sanitizeNameInput(el.querySelector('.iname')),
     threshold: readIntegerInput(el.querySelector('.ith')),
-    duration: readIntegerInput(el.querySelector('.idur'))
+    duration: readIntegerInput(el.querySelector('.idur')),
+    waterInterval: readIntegerInput(el.querySelector('.iwint'))
     };
 }
 
@@ -292,10 +344,10 @@ async function applyNode(el){
     const res = await fetch('/worker/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     if (!res.ok) throw new Error(await res.text());
     dirty.delete(id);
-    setStatus(id, 'Saved', true);
+    setStatus(id, t('status.saved'), true);
     } catch (e) {
     console.error('applyNode', id, e);
-    setStatus(id, 'Save failed', false);
+    setStatus(id, t('error.saveFailed'), false);
     } finally {
     pending.delete(id); updateButtons();
     }
@@ -330,10 +382,10 @@ async function applyWorker(wel){
     const res = await fetch('/worker/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     if (!res.ok) throw new Error(await res.text());
     dirty.delete(id);
-    setStatus(mac+'-all', 'Saved', true);
+    setStatus(mac+'-all', t('status.saved'), true);
     } catch (e) {
     console.error('applyWorker', mac, e);
-    setStatus(mac+'-all', 'Save failed', false);
+    setStatus(mac+'-all', t('error.saveFailed'), false);
     } finally {
     pending.delete(id); updateButtons();
     }
@@ -354,13 +406,13 @@ async function refreshWorkersFull(){
     lastSyncAgo: w.lastSyncAgo ?? null,
     rssi: w.rssi ?? null,
     nodePotCount: w.nodePotCount,
-    pots: (w.pots || []).map(p => ({ potIndex: (typeof p.index === 'number' ? p.index : 0), name: p.name, threshold: p.threshold, duration: p.duration, soil: p.soil, soilRaw: p.soilRaw ?? null, lastWaterAgo: p.lastWaterAgo ?? null }))
+    pots: (w.pots || []).map(p => ({ potIndex: (typeof p.index === 'number' ? p.index : 0), name: p.name, threshold: p.threshold, duration: p.duration, waterInterval: p.waterInterval, soil: p.soil, soilRaw: p.soilRaw ?? null, lastAutoWateringAgo: p.lastAutoWateringAgo ?? null }))
     }));
     workers.forEach(w => w.pots.sort((a,b)=> (a.potIndex - b.potIndex)));
     updateWorkerListHeader(workers.length);
 
     if (workers.length === 0) {
-    container.innerText = 'No workers configured';
+    container.innerText = t('main.noWorkers');
     updateManualControls();
     updateButtons();
     return;
@@ -373,18 +425,16 @@ async function refreshWorkersFull(){
     const workerDiv = document.createElement('div');
     workerDiv.className = 'worker';
     workerDiv.dataset.mac = worker.mac;
-    workerDiv.style.padding = '6px 0';
     workerDiv.innerHTML = `
-        <hr>
         <div><strong>${idx}. ${worker.mac}</strong></div>
         <div class="field long">
-        <label for="workerName-${worker.mac}">Worker name</label>
-        <input id="workerName-${worker.mac}" class="wname" value="${escapeHtml(worker.workerName)}" maxlength="64" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji.">
+        <label for="workerName-${worker.mac}">${escapeHtml(t('main.workerName'))}</label>
+        <input id="workerName-${worker.mac}" class="wname" value="${escapeHtml(worker.workerName)}" maxlength="64" title="${escapeHtml(t('main.nameHelp'))}">
         </div>
-        <div class="wmeta meta">${formatBattery(worker)} Last Sync: ${formatRelativeAge(worker.lastSyncAgo)} RSSI: ${worker.rssi===null?'-':(worker.rssi + 'dBm')}</div>
+        <div class="wmeta meta">${escapeHtml(formatWorkerMeta(worker))}</div>
         <div class="actions">
-        <button class="applyWorkerBtn">Apply</button>
-        <button class="removeAllBtn">Remove</button>
+        <button class="applyWorkerBtn">${escapeHtml(t('common.apply'))}</button>
+        <button class="removeAllBtn secondary danger">${escapeHtml(t('common.remove'))}</button>
         </div>
     `;
     container.appendChild(workerDiv);
@@ -405,15 +455,15 @@ async function refreshWorkersFull(){
     // bind remove all
     const removeAllBtn = workerDiv.querySelector('.removeAllBtn');
     removeAllBtn.addEventListener('click', async ()=> {
-        setStatus(worker.mac+'-all', 'Removing...', false);
+        setStatus(worker.mac+'-all', t('status.removing'), false);
         const ok = await removeWorker(worker.mac);
-        if (ok) { setStatus(worker.mac+'-all', 'Removed', true); setTimeout(refreshWorkersFull,300); } else setStatus(worker.mac+'-all', 'Remove failed', false);
+        if (ok) { setStatus(worker.mac+'-all', t('status.removed'), true); setTimeout(refreshWorkersFull,300); } else setStatus(worker.mac+'-all', t('error.removeFailed'), false);
     });
 
     // render pots (ordered by potIndex)
     if (!worker.pots || worker.pots.length === 0) {
         const p = document.createElement('div');
-        p.innerText = 'No pots configured/synced yet';
+        p.innerText = t('main.noPots');
         workerDiv.appendChild(p);
     } else {
         for (let pi=0; pi<worker.pots.length; ++pi) {
@@ -424,38 +474,43 @@ async function refreshWorkersFull(){
         div.dataset.pi = (pot.potIndex===undefined?0:pot.potIndex);
         const id = worker.mac + '-' + div.dataset.pi;
         div.dataset.id = id;
-        div.style.padding = '6px 6px';
         div.innerHTML = `
-            <div><strong>Pot ${pot.potIndex+1}</strong></div>
+            <div class="pot-title"><strong>${escapeHtml(t('main.pot', {number: pot.potIndex+1}))}</strong></div>
             <div class="field-row">
             <div class="field long compact">
-                <label for="potName-${id}">Name</label>
-                <input id="potName-${id}" class="iname" value="${escapeHtml(pot.name||'')}" maxlength="64" title="Up to 64 UTF-8 bytes, e.g. about 64 ASCII chars or 16 emoji.">
+                <label for="potName-${id}">${escapeHtml(t('common.name'))}</label>
+                <input id="potName-${id}" class="iname" value="${escapeHtml(pot.name||'')}" maxlength="64" title="${escapeHtml(t('main.nameHelp'))}">
             </div>
             <div class="field short compact">
-                <label for="potThreshold-${id}">Threshold</label>
+                <label for="potThreshold-${id}">${escapeHtml(t('field.threshold'))}</label>
                 <input id="potThreshold-${id}" class="ith" type="number" value="${pot.threshold}" min="0" max="4095" step="1" required>
             </div>
             <div class="field short compact">
-                <label for="potDuration-${id}">Duration(s)</label>
+                <label for="potDuration-${id}">${escapeHtml(t('field.duration'))}</label>
                 <input id="potDuration-${id}" class="idur" type="number" value="${pot.duration}" min="1" max="60" step="1" required>
+            </div>
+            <div class="field medium compact">
+                <label for="potWaterInterval-${id}">${escapeHtml(t('field.waterInterval'))}</label>
+                <input id="potWaterInterval-${id}" class="iwint" type="number" value="${pot.waterInterval}" min="60" max="2419200" step="1" required>
             </div>
             </div>
             <div class="meta">
                 <span class="soil">${formatSoil(pot)}</span>
-                <span class="lastwater" style="margin-left:8px">Last Water: ${formatRelativeAge(pot.lastWaterAgo)}</span>
+                <span class="lastwater" style="margin-left:8px">${escapeHtml(t('metric.lastAutoWater', {value: formatRelativeAge(pot.lastAutoWateringAgo)}))}</span>
             </div>
             <div class="actions">
-                <button class="waterBtn" disabled>Open Valve</button>
+                <button class="waterBtn secondary" disabled>${escapeHtml(t('main.openValve'))}</button>
                 <span class="status" style="margin-left:8px"></span>
             </div>
         `;
         const iname = div.querySelector('.iname');
         const ith = div.querySelector('.ith');
         const idur = div.querySelector('.idur');
+        const iwint = div.querySelector('.iwint');
         iname.addEventListener('input', ()=> { sanitizeNameInput(iname); markDirty(id); });
         ith.addEventListener('input', ()=> markDirty(id));
         idur.addEventListener('input', ()=> markDirty(id));
+        iwint.addEventListener('input', ()=> markDirty(id));
         const waterBtn = div.querySelector('.waterBtn');
         // display sensor status and disable water button if sensor not connected or worker not synced
         const soilSpan = div.querySelector('.soil');
@@ -468,13 +523,13 @@ async function refreshWorkersFull(){
             soilSpan.innerText = formatSoil(pot);
             setWaterButtonBlocked(waterBtn, !synced);
         }
-        if (lastSpan) lastSpan.innerText = 'Last Water: ' + formatRelativeAge(pot.lastWaterAgo);
+        if (lastSpan) lastSpan.innerText = t('metric.lastAutoWater', {value: formatRelativeAge(pot.lastAutoWateringAgo)});
         waterBtn.addEventListener('click', async ()=> {
             let dur;
             try { dur = readIntegerInput(idur); } catch (e) { idur.reportValidity(); return; }
-            setStatus(id, 'Sending...', false);
+            setStatus(id, t('status.sending'), false);
             const ok = await waterWorker(div.dataset.mac, Number(div.dataset.pi), dur);
-            if (ok) setStatus(id, 'Valve command sent', true); else setStatus(id, 'Send failed', false);
+            if (ok) setStatus(id, t('status.valveCommandSent'), true); else setStatus(id, t('error.sendFailed'), false);
         });
         workerDiv.appendChild(div);
         }
@@ -496,7 +551,7 @@ async function refreshWorkersPartial(){
         batteryMv: w.batteryMv ?? null,
         lastSyncAgo: w.lastSyncAgo ?? null,
         rssi: w.rssi ?? null,
-        pots: (w.pots || []).map(p => ({ potIndex: (typeof p.index === 'number' ? p.index : 0), soil: p.soil, soilRaw: p.soilRaw ?? null, lastWaterAgo: p.lastWaterAgo ?? null }))
+        pots: (w.pots || []).map(p => ({ potIndex: (typeof p.index === 'number' ? p.index : 0), soil: p.soil, soilRaw: p.soilRaw ?? null, lastAutoWateringAgo: p.lastAutoWateringAgo ?? null }))
     }));
     workers.forEach(w => w.pots.sort((a,b)=> (a.potIndex - b.potIndex)));
 
@@ -524,7 +579,7 @@ async function refreshWorkersPartial(){
         // update header meta
         const winfo = workerDiv.querySelector('.wmeta');
         if (winfo) {
-        winfo.innerText = `${formatBattery(worker)} Last Sync: ${formatRelativeAge(worker.lastSyncAgo)} RSSI: ${worker.rssi===null?'-':(worker.rssi + 'dBm')}`;
+        winfo.innerText = formatWorkerMeta(worker);
         }
         // update pots
         for (let pi=0; pi<worker.pots.length; ++pi) {
@@ -538,7 +593,7 @@ async function refreshWorkersPartial(){
         if (soilSpan) {
             soilSpan.innerText = formatSoil(pot);
         }
-        if (lastSpan) lastSpan.innerText = 'Last Water: ' + formatRelativeAge(pot.lastWaterAgo);
+        if (lastSpan) lastSpan.innerText = t('metric.lastAutoWater', {value: formatRelativeAge(pot.lastAutoWateringAgo)});
         setWaterButtonBlocked(waterBtn, (isSoilDisconnected(pot) || !synced));
         }
     }
@@ -554,10 +609,19 @@ function finiteNumber(value) {
 }
 
 function formatBattery(worker) {
-    if (!worker || !finiteNumber(worker.battery)) return 'Battery: -';
-    let text = 'Battery: ' + worker.battery + '%';
-    if (debugMode && finiteNumber(worker.batteryMv)) text += ' (' + worker.batteryMv + ' mV)';
+    const value = worker && finiteNumber(worker.battery) ? worker.battery + '%' : '-';
+    let text = t('metric.battery', {value});
+    if (debugMode && worker && finiteNumber(worker.batteryMv)) text += ' (' + worker.batteryMv + ' mV)';
     return text;
+}
+
+function formatWorkerMeta(worker) {
+    const rssi = worker && finiteNumber(worker.rssi) ? worker.rssi + ' dBm' : '-';
+    return [
+    formatBattery(worker),
+    t('metric.lastSync', {value: formatRelativeAge(worker ? worker.lastSyncAgo : null)}),
+    t('metric.rssi', {value: rssi})
+    ].join(' ');
 }
 
 function isSoilDisconnected(pot) {
@@ -566,55 +630,61 @@ function isSoilDisconnected(pot) {
 
 function formatSoil(pot) {
     if (isSoilDisconnected(pot)) {
-    let text = 'Soil Moisture: Sensor not connected';
-    if (debugMode && finiteNumber(pot.soilRaw)) text += ' (raw ' + pot.soilRaw + ')';
+    let text = t('metric.soilMoisture', {value: t('metric.sensorNotConnected')});
+    if (debugMode && finiteNumber(pot.soilRaw)) text += ' (' + t('metric.raw', {value: pot.soilRaw}) + ')';
     return text;
     }
-    let text = 'Soil Moisture: ' + (pot && finiteNumber(pot.soil) ? pot.soil : '-');
-    if (debugMode && pot && finiteNumber(pot.soilRaw)) text += ' (raw ' + pot.soilRaw + ')';
+    let text = t('metric.soilMoisture', {value: pot && finiteNumber(pot.soil) ? pot.soil : '-'});
+    if (debugMode && pot && finiteNumber(pot.soilRaw)) text += ' (' + t('metric.raw', {value: pot.soilRaw}) + ')';
     return text;
+}
+
+function relativeParts(secondsValue){
+    const seconds = Math.floor(secondsValue);
+    let value;
+    let unit;
+    if (seconds < 60) {
+    value = seconds;
+    unit = 'second';
+    } else if (seconds < 3600) {
+    value = Math.floor(seconds / 60);
+    unit = 'minute';
+    } else if (seconds < 86400) {
+    value = Math.floor(seconds / 3600);
+    unit = 'hour';
+    } else {
+    value = Math.floor(seconds / 86400);
+    unit = 'day';
+    }
+    return {value, unit};
+}
+
+function formatRelative(value, future) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return '-';
+    const parts = relativeParts(value);
+    try {
+    return new Intl.RelativeTimeFormat(currentLanguage, {numeric:'always'}).format(
+        future ? parts.value : -parts.value, parts.unit);
+    } catch (e) {
+    const unit = t(`unit.${parts.unit}.${parts.value === 1 ? 'one' : 'other'}`);
+    return t(future ? 'relative.future' : 'relative.past', {value: parts.value, unit});
+    }
 }
 
 function formatRelativeAge(ageSeconds){
-    if (typeof ageSeconds !== 'number' || !Number.isFinite(ageSeconds) || ageSeconds < 0) return '-';
-    const seconds = Math.floor(ageSeconds);
-    let value;
-    let unit;
-    if (seconds < 60) {
-    value = seconds;
-    unit = 'second';
-    } else if (seconds < 3600) {
-    value = Math.floor(seconds / 60);
-    unit = 'minute';
-    } else if (seconds < 86400) {
-    value = Math.floor(seconds / 3600);
-    unit = 'hour';
-    } else {
-    value = Math.floor(seconds / 86400);
-    unit = 'day';
-    }
-    return value + ' ' + unit + (value === 1 ? '' : 's') + ' ago';
+    return formatRelative(ageSeconds, false);
 }
 
 function formatRelativeFuture(secondsUntil){
-    if (typeof secondsUntil !== 'number' || !Number.isFinite(secondsUntil) || secondsUntil < 0) return '-';
-    const seconds = Math.floor(secondsUntil);
-    let value;
-    let unit;
-    if (seconds < 60) {
-    value = seconds;
-    unit = 'second';
-    } else if (seconds < 3600) {
-    value = Math.floor(seconds / 60);
-    unit = 'minute';
-    } else if (seconds < 86400) {
-    value = Math.floor(seconds / 3600);
-    unit = 'hour';
-    } else {
-    value = Math.floor(seconds / 86400);
-    unit = 'day';
-    }
-    return 'in ' + value + ' ' + unit + (value === 1 ? '' : 's');
+    return formatRelative(secondsUntil, true);
+}
+
+function formatUptime(uptimeSeconds){
+    if (typeof uptimeSeconds !== 'number' || !Number.isFinite(uptimeSeconds) || uptimeSeconds < 0) return '-';
+    const seconds = Math.floor(uptimeSeconds);
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return String(hours).padStart(2, '0') + ':' + String(minutes).padStart(2, '0');
 }
 
 async function addWorker(){
@@ -653,10 +723,20 @@ async function waterWorker(mac, potIndex, duration){
 
 async function togglePump(){
     const btn = document.getElementById('pumpBtn');
+    const status = document.getElementById('pumpStatus');
     if (btn) btn.disabled = true;
     try {
     const res = await fetch('/pump/toggle', {method:'POST'});
-    if (res.ok) await fetchStatus();
+    if (!res.ok) {
+        const code = await res.text();
+        if (status) status.innerText = protocolErrorText(code, 'error.startFailed');
+        await fetchStatus();
+        return;
+    }
+    if (status) status.innerText = '';
+    await fetchStatus();
+    } catch (e) {
+    if (status) status.innerText = t('error.startFailed');
     } finally {
     updateManualControls();
     }
@@ -670,7 +750,8 @@ async function applySettings(){
     const activeStartInput = document.getElementById('activeStart');
     const activeEndInput = document.getElementById('activeEnd');
     const timezoneInput = document.getElementById('tzOffset');
-    const requiredInputs = [timezoneInput, activeStartInput, activeEndInput, document.getElementById('newWint'), document.getElementById('newDsint'), document.getElementById('newPumpDelay'), document.getElementById('newManualPumpTimeout')];
+    const languageInput = document.getElementById('language');
+    const requiredInputs = [languageInput, timezoneInput, activeStartInput, activeEndInput, document.getElementById('newDsint'), document.getElementById('newPumpDelay'), document.getElementById('newManualPumpTimeout')];
     const invalid = requiredInputs.find(input => !input || !input.checkValidity());
     if (invalid) { if (invalid.reportValidity) invalid.reportValidity(); throw new Error('Invalid settings'); }
     const timeToSeconds = input => {
@@ -680,8 +761,8 @@ async function applySettings(){
     };
     const body = {
         name:sanitizeNameInput(document.getElementById('name')),
+        language:languageInput.value,
         auto:document.getElementById('newAuto').checked,
-        wint:readIntegerInput(document.getElementById('newWint')),
         dsint:readIntegerInput(document.getElementById('newDsint')),
         pumpDelay:readIntegerInput(document.getElementById('newPumpDelay')),
         manualPumpTimeout:readIntegerInput(document.getElementById('newManualPumpTimeout')),
@@ -691,14 +772,17 @@ async function applySettings(){
     };
     if (timeVal) body.newTime = timeVal;
     btn.disabled = true;
-    status.innerText = 'Saving...'; status.style.color = 'gray';
+    status.innerText = t('status.saving'); status.style.color = 'gray';
     const res = await fetch('/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     if (!res.ok) throw new Error(await res.text());
-    status.innerText = 'Saved'; status.style.color = 'green';
+    setLanguage(languageInput.value);
+    status.innerText = t('status.saved'); status.style.color = 'green';
     settingsInputsLoaded = false;
     setTimeout(fetchStatus,300);
+    setTimeout(refreshWorkersFull,300);
+    if (debugMode) setTimeout(fetchDiagnostics,300);
     } catch (e) {
-    status.innerText = 'Save failed'; status.style.color = 'crimson';
+    status.innerText = t('error.saveFailed'); status.style.color = 'crimson';
     } finally {
     btn.disabled = false;
     setTimeout(()=>{ status.innerText = ''; }, 3000);
@@ -709,7 +793,7 @@ async function syncTime(){
     const btn = document.getElementById('syncTimeBtn');
     const status = document.getElementById('syncStatus');
     if (!btn || !status) return;
-    btn.disabled = true; status.innerText = 'Syncing...'; status.style.color = 'gray';
+    btn.disabled = true; status.innerText = t('status.syncing'); status.style.color = 'gray';
     try {
     const res = await fetch('/time/sync', {method:'POST'});
     const j = await res.json();
@@ -717,7 +801,7 @@ async function syncTime(){
     timeSyncRequested = true;
     await fetchStatus();
     } catch (e) {
-    status.innerText = 'Sync failed'; status.style.color = 'crimson';
+    status.innerText = t('error.syncFailed'); status.style.color = 'crimson';
     btn.disabled = false;
     setTimeout(()=>{ status.innerText=''; }, 3000);
     }
@@ -732,35 +816,35 @@ function updateTimeSyncStatus(j) {
     if (!btn || !status) return;
     if (j.clockSyncPending) {
     btn.disabled = true;
-    status.innerText = 'Syncing...'; status.style.color = 'gray';
+    status.innerText = t('status.syncing'); status.style.color = 'gray';
     return;
     }
     timeSyncRequested = false;
     btn.disabled = false;
     if (j.clockSyncError) {
-    status.innerText = 'Sync failed'; status.style.color = 'crimson';
+    status.innerText = t('error.syncFailed'); status.style.color = 'crimson';
     } else {
-    status.innerText = 'Synced'; status.style.color = 'green';
+    status.innerText = t('status.synced'); status.style.color = 'green';
     }
     setTimeout(()=>{ status.innerText=''; }, 3000);
 }
 
 async function clearWifiCredConfirm() {
-    const confirmed = confirm("Are you sure you want to clear saved WiFi credentials? This action cannot be undone.");
+    const confirmed = confirm(t('confirm.clearWifi'));
     if (!confirmed) return;
     
     const btn = document.getElementById('clearWifiBtn');
     const status = document.getElementById('wifiStatus');
     btn.disabled = true;
-    status.innerText = 'Clearing...'; status.style.color = 'gray';
+    status.innerText = t('status.clearing'); status.style.color = 'gray';
     
     try {
     const res = await fetch('/wifi/clear', {method:'POST'});
     if (!res.ok) throw new Error(await res.text());
-    status.innerText = 'Cleared'; status.style.color = 'green';
+    status.innerText = t('status.cleared'); status.style.color = 'green';
     setTimeout(fetchStatus, 300);
     } catch (e) {
-    status.innerText = 'Clear failed'; status.style.color = 'crimson';
+    status.innerText = t('error.clearFailed'); status.style.color = 'crimson';
     } finally {
     btn.disabled = false;
     setTimeout(()=>{ status.innerText = ''; }, 3000);
@@ -768,20 +852,20 @@ async function clearWifiCredConfirm() {
 }
 
 async function clearAllSettingsConfirm() {
-    const confirmed = confirm("Are you sure you want to reset all settings and remove all workers? This action cannot be undone.");
+    const confirmed = confirm(t('confirm.resetAll'));
     if (!confirmed) return;
     const btn = document.getElementById('clearAllBtn');
     const status = document.getElementById('resetStatus');
     btn.disabled = true;
-    status.innerText = 'Resetting...'; status.style.color = 'gray';
+    status.innerText = t('status.resetting'); status.style.color = 'gray';
     try {
     const res = await fetch('/settings/clear_all', {method:'POST'});
     if (!res.ok) throw new Error(await res.text());
-    status.innerText = 'Reset'; status.style.color = 'green';
+    status.innerText = t('status.reset'); status.style.color = 'green';
     setTimeout(fetchStatus, 300);
     setTimeout(refreshWorkersFull, 300);
     } catch (e) {
-    status.innerText = 'Reset failed'; status.style.color = 'crimson';
+    status.innerText = t('error.resetFailed'); status.style.color = 'crimson';
     } finally {
     btn.disabled = false; setTimeout(()=>{ status.innerText=''; }, 3000);
     }
@@ -794,23 +878,23 @@ function renderDiagnostics(j){
     function fmt(n){ if (n===null || n===undefined) return '-'; return n; }
     function fmtKb(n){ if (n===null || n===undefined) return '-'; return parseFloat((n/1024).toFixed(2)); }
     tbl.innerHTML = `
-    <tr><th>Metric</th><th>Value</th></tr>
-    <tr><td>Free Heap (KiB)</td><td>${fmtKb(j.freeHeap)}</td></tr>
-    <tr><td>Minimum Free Heap (KiB)</td><td>${fmtKb(j.minFreeHeap)}</td></tr>
-    <tr><td>Largest Free Block (KiB)</td><td>${fmtKb(j.largestFreeBlock)}</td></tr>
-    <tr><td>Total Heap (KiB)</td><td>${fmtKb(j.heapSize)}</td></tr>
-    <tr><td>Loop Stack Minimum Free (bytes)</td><td>${fmt(j.loopStackMinFree)}</td></tr>
-    <tr><td>Web Stack Minimum Free (bytes)</td><td>${fmt(j.webStackMinFree)}</td></tr>
-    <tr><td>Sensor Stack Minimum Free (bytes)</td><td>${fmt(j.sensorStackMinFree)}</td></tr>
-    <tr><td>Watering Stack Minimum Free (bytes)</td><td>${fmt(j.wateringStackMinFree)}</td></tr>
-    <tr><td>Bluetooth TX Stack Minimum Free (bytes)</td><td>${fmt(j.btSenderStackMinFree)}</td></tr>
-    <tr><td>Free Sketch Space (KiB)</td><td>${fmtKb(j.freeSketchSpace)}</td></tr>
-    <tr><td>Sketch Size (KiB)</td><td>${fmtKb(j.sketchSize)}</td></tr>
-    <tr><td>Flash Chip Size (KiB)</td><td>${fmtKb(j.flashChipSize)}</td></tr>
-    <tr><td>Chip Revision</td><td>${fmt(j.chipRevision)}</td></tr>
-    <tr><td>NVS used entries</td><td>${fmt(j.nvs_entries)}</td></tr>
-    <tr><td>NVS total entries</td><td>${fmt(j.nvs_total_entries)}</td></tr>
-    <tr><td>WiFi RSSI (dBm)</td><td>${fmt(j.rssi)}</td></tr>
+    <tr><th>${escapeHtml(t('diagnostics.metric'))}</th><th>${escapeHtml(t('common.value'))}</th></tr>
+    <tr><td>${escapeHtml(t('diagnostics.freeHeap'))}</td><td>${fmtKb(j.freeHeap)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.minimumFreeHeap'))}</td><td>${fmtKb(j.minFreeHeap)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.largestFreeBlock'))}</td><td>${fmtKb(j.largestFreeBlock)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.totalHeap'))}</td><td>${fmtKb(j.heapSize)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.loopStack'))}</td><td>${fmt(j.loopStackMinFree)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.webStack'))}</td><td>${fmt(j.webStackMinFree)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.sensorStack'))}</td><td>${fmt(j.sensorStackMinFree)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.wateringStack'))}</td><td>${fmt(j.wateringStackMinFree)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.bluetoothStack'))}</td><td>${fmt(j.btSenderStackMinFree)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.freeSketchSpace'))}</td><td>${fmtKb(j.freeSketchSpace)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.sketchSize'))}</td><td>${fmtKb(j.sketchSize)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.flashChipSize'))}</td><td>${fmtKb(j.flashChipSize)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.chipRevision'))}</td><td>${fmt(j.chipRevision)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.nvsUsed'))}</td><td>${fmt(j.nvs_entries)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.nvsTotal'))}</td><td>${fmt(j.nvs_total_entries)}</td></tr>
+    <tr><td>${escapeHtml(t('diagnostics.wifiRssi'))}</td><td>${fmt(j.rssi)}</td></tr>
     `;
 }
 
@@ -829,15 +913,19 @@ async function fetchStatus(){
     try {
     let r = await fetch('/status');
     let j = await r.json();
+    const languageChanged = setLanguage(j.language);
+    tankSafe = j.tankSafe === true;
+    const uptimeSpan = document.getElementById('uptime');
+    if (uptimeSpan) uptimeSpan.innerText = formatUptime(j.now);
     const tankEl = document.getElementById('tank');
     if (tankEl) {
         let ttext = '-';
         if (typeof j.tank === 'number') {
         const v = j.tank;
-        if (v < 10) ttext = 'Low';
-        else if (v > 2800) ttext = 'High';
-        else ttext = 'Not Connected';
-        if (debugMode) ttext += ' (raw ' + v + ' mV)';
+        if (v < 10) ttext = t('state.tank.low');
+        else if (v > 2800) ttext = t('state.tank.high');
+        else ttext = t('state.tank.notConnected');
+        if (debugMode) ttext += ' (' + t('metric.raw', {value: v + ' mV'}) + ')';
         }
         tankEl.innerText = ttext;
     }
@@ -850,12 +938,12 @@ async function fetchStatus(){
         if (timeSpan) timeSpan.innerText = s;
     } else {
         const timeSpan = document.getElementById('time');
-        if (timeSpan) timeSpan.innerText = 'Invalid';
+        if (timeSpan) timeSpan.innerText = t('state.time.invalid');
     }
     const sourceSpan = document.getElementById('clockSource');
     if (sourceSpan) {
-        const source = typeof j.clockSource === 'string' ? j.clockSource : 'uninitialized';
-        sourceSpan.innerText = source.charAt(0).toUpperCase() + source.slice(1);
+        const source = typeof j.clockSource === 'string' ? j.clockSource.toLowerCase() : 'uninitialized';
+        sourceSpan.innerText = translatedCode('state.clock.', source, source);
     }
     updateTimeSyncStatus(j);
 
@@ -863,10 +951,8 @@ async function fetchStatus(){
     autoMode = !!j.auto;
     manualPumpActive = !!j.manualPumpActive;
     if (Number.isSafeInteger(j.manualPumpTimeout)) manualPumpTimeout = j.manualPumpTimeout;
-    if (autoSpan) autoSpan.innerText = autoMode ? "On" : "Off";
+    if (autoSpan) autoSpan.innerText = autoMode ? t('state.on') : t('state.off');
 
-    const wintSpan = document.getElementById('wint');
-    if (wintSpan) wintSpan.innerText = j.waterInterval || 3600;
     const dsintSpan = document.getElementById('dsint');
     if (dsintSpan) dsintSpan.innerText = j.dataSyncInterval || 3600;
     const lastDataSyncSpan = document.getElementById('lastDataSync');
@@ -874,14 +960,12 @@ async function fetchStatus(){
     const nextDataSyncSpan = document.getElementById('nextDataSync');
     if (nextDataSyncSpan) nextDataSyncSpan.innerText = formatRelativeFuture(j.nextDataSyncIn);
     const statusSpan = document.getElementById('status');
-    if (statusSpan) statusSpan.innerText = j.state || '-';
-    const lastSpan = document.getElementById('last');
-    if (lastSpan) lastSpan.innerText = formatRelativeAge(j.lastAutoWateringAgo);
+    if (statusSpan) statusSpan.innerText = translatedCode('state.main.', j.state, j.state || '-');
     if (Number.isSafeInteger(j.maxWorkerCount)) maxWorkerCount = j.maxWorkerCount;
     if (Number.isSafeInteger(j.workerCount)) updateWorkerListHeader(j.workerCount);
 
     const title = document.getElementById('title');
-    if (title) title.innerText = 'Plant Watering ' + (j.name?('(' + j.name + ')'):"" );
+    if (title) title.innerText = j.name ? t('app.titleNamed', {name: j.name}) : t('app.title');
 
     // populate timezone display every refresh, but editable settings inputs only on page load
     try {
@@ -900,6 +984,10 @@ async function fetchStatus(){
     } catch(e) {}
 
     updateManualControls();
+    if (languageChanged && pageBootstrapped) {
+        await refreshWorkersFull();
+        if (debugMode) await fetchDiagnostics();
+    }
     } catch (e) {
     console.error('fetchStatus', e);
     }
@@ -917,6 +1005,8 @@ function populateSettingsInputs(j){
     if (nameInput) { nameInput.value = j.name || ''; sanitizeNameInput(nameInput); }
     const autoInput = document.getElementById('newAuto');
     if (autoInput) autoInput.checked = !!j.auto;
+    const languageInput = document.getElementById('language');
+    if (languageInput) languageInput.value = j.language === 'zh-CN' ? 'zh-CN' : 'en';
     if (typeof j.activeStart === 'number') {
     const el = document.getElementById('activeStart');
     if (el) el.value = formatTimeInput(j.activeStart);
@@ -924,10 +1014,6 @@ function populateSettingsInputs(j){
     if (typeof j.activeEnd === 'number') {
     const el = document.getElementById('activeEnd');
     if (el) el.value = formatTimeInput(j.activeEnd);
-    }
-    if (typeof j.waterInterval === 'number') {
-    const el = document.getElementById('newWint');
-    if (el) el.value = j.waterInterval;
     }
     if (typeof j.dataSyncInterval === 'number') {
     const el = document.getElementById('newDsint');
@@ -950,7 +1036,7 @@ function populateSettingsInputs(j){
         const absolute = Math.abs(j.tzOffsetMinutes);
         const option = document.createElement('option');
         option.value = savedValue;
-        option.textContent = 'UTC' + sign + String(Math.floor(absolute / 60)).padStart(2, '0') + ':' + String(absolute % 60).padStart(2, '0') + ' (saved)';
+        option.textContent = 'UTC' + sign + String(Math.floor(absolute / 60)).padStart(2, '0') + ':' + String(absolute % 60).padStart(2, '0') + ' ' + t('timezone.saved');
         el.appendChild(option);
         }
         el.value = savedValue;
@@ -962,6 +1048,7 @@ function populateSettingsInputs(j){
 // Poll less frequently to reduce CPU/network and avoid clobbering user inputs
 const diagnosticsSection = document.getElementById('diagnosticsSection');
 if (diagnosticsSection) diagnosticsSection.style.display = debugMode ? '' : 'none';
+applyStaticTranslations();
 populateTimezoneOptions();
 const mainNameInput = document.getElementById('name');
 if (mainNameInput) mainNameInput.addEventListener('input', ()=> sanitizeNameInput(mainNameInput));
@@ -969,15 +1056,18 @@ const addWorkerNameInput = document.getElementById('wname');
 if (addWorkerNameInput) addWorkerNameInput.addEventListener('input', ()=> sanitizeNameInput(addWorkerNameInput));
 const addWorkerMacInput = document.getElementById('wmac');
 if (addWorkerMacInput) addWorkerMacInput.addEventListener('input', ()=> sanitizeMacInput(addWorkerMacInput));
-setInterval(fetchStatus,3000);
-setInterval(refreshWorkersPartial,5000);
-fetchStatus();
-if (debugMode) {
-    setInterval(fetchDiagnostics,10000);
-    fetchDiagnostics();
+
+async function bootstrap() {
+    await fetchStatus();
+    await refreshWorkersFull();
+    if (debugMode) await fetchDiagnostics();
+    pageBootstrapped = true;
+    setInterval(fetchStatus,3000);
+    setInterval(refreshWorkersPartial,5000);
+    if (debugMode) setInterval(fetchDiagnostics,10000);
 }
-// initial full worker list render
-refreshWorkersFull();
+
+bootstrap();
 </script>
 </body>
 </html>

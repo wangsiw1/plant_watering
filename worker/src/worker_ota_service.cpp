@@ -1,5 +1,6 @@
 #include "WorkerOtaService.h"
 
+#include "FirmwareVersionPolicy.h"
 #include "Utility.h"
 #include "Valve.h"
 
@@ -13,6 +14,18 @@
 
 #ifndef FW_VERSION
 #error "FW_VERSION must be supplied by PlatformIO build_flags"
+#endif
+
+#ifndef FW_MIN_ALLOWED_VERSION
+#error "FW_MIN_ALLOWED_VERSION must be supplied by PlatformIO build_flags"
+#endif
+
+#if FW_MIN_ALLOWED_VERSION < 1
+#error "FW_MIN_ALLOWED_VERSION must be greater than zero"
+#endif
+
+#if FW_MIN_ALLOWED_VERSION > FW_VERSION
+#error "FW_MIN_ALLOWED_VERSION must not exceed FW_VERSION"
 #endif
 
 #ifndef FW_HARDWARE_TARGET
@@ -58,7 +71,8 @@ enum class WorkerOtaError : uint8_t {
   HASH_MISMATCH = 10,
   VALIDATION_FAILED = 11,
   SET_BOOT_FAILED = 12,
-  ABORTED = 13
+  ABORTED = 13,
+  VERSION_BELOW_MINIMUM = 14
 };
 
 struct PackageHeader {
@@ -251,9 +265,16 @@ void handlePrepare(const uint8_t* data, size_t len) {
     fail(WorkerOtaError::WRONG_HARDWARE);
     return;
   }
-  if (gHeader.firmwareVersion <= FW_VERSION) {
-    fail(WorkerOtaError::ALREADY_UP_TO_DATE);
-    return;
+  switch (firmwareVersionDecision(FW_VERSION, gHeader.firmwareVersion,
+                                  FW_MIN_ALLOWED_VERSION)) {
+    case FirmwareVersionDecision::ALREADY_INSTALLED:
+      fail(WorkerOtaError::ALREADY_UP_TO_DATE);
+      return;
+    case FirmwareVersionDecision::BELOW_MINIMUM:
+      fail(WorkerOtaError::VERSION_BELOW_MINIMUM);
+      return;
+    case FirmwareVersionDecision::ALLOW:
+      break;
   }
   gTargetPartition = esp_ota_get_next_update_partition(nullptr);
   if (!gTargetPartition) {

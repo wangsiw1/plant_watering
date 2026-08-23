@@ -3,55 +3,138 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Firmware Update</title>
+  <title data-i18n="ota.pageTitle">Firmware Update</title>
+  <style>
+*{box-sizing:border-box}
+body{font:15px system-ui,sans-serif;max-width:900px;margin:auto;padding:16px;line-height:1.4}
+h2{margin:8px 0 18px}h3{margin:0 0 12px;padding-bottom:6px;border-bottom:1px solid #ddd}
+section{margin:14px 0;padding:16px;border:1px solid #ddd;border-radius:9px}
+.notice{padding:10px 12px;border-left:3px solid #c78920;background:#fffaf0}.row{display:grid;grid-template-columns:180px 1fr;gap:10px;margin:8px 0}.label,.meta{color:#666}
+input,button{font:inherit;padding:8px;border:1px solid #bbb;border-radius:6px;background:#fff}input[type=file]{width:100%;max-width:520px}
+button{border-color:#287a43;background:#287a43;color:#fff;cursor:pointer}button.secondary{background:#fff;color:#287a43}button:disabled{opacity:.5;cursor:default}
+.actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;margin-top:12px}.badge{display:inline-block;width:max-content;padding:2px 8px;border-radius:20px;background:#e2f2e6;color:#17602d;font-weight:600}
+progress{width:100%;max-width:520px;height:16px;accent-color:#287a43}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;min-width:620px}th,td{padding:8px;border:1px solid #ddd;text-align:left;vertical-align:middle}th{background:#f5f5f5}td progress{min-width:130px}code{overflow-wrap:anywhere}a{color:#1769aa}
+@media(max-width:600px){body{padding:10px}section{padding:12px}.row{grid-template-columns:1fr;gap:1px}.actions button{min-height:42px}.notice{padding:9px 10px}}
+  </style>
 </head>
 <body>
-  <center>
-    <h2>Firmware Update</h2>
-    <h3>Main</h3>
-    <p>Installed version: <span id="currentVersion">-</span></p>
-    <p>Hardware target: <span id="currentHardware">-</span></p>
-    <p><input id="firmwareFile" type="file" accept=".ota,application/octet-stream"></p>
-    <p><button id="uploadButton" onclick="uploadFirmware()">Upload Firmware</button></p>
-    <p><progress id="uploadProgress" value="0" max="100"></progress></p>
-    <p id="uploadStatus">Idle</p>
+  <h2 data-i18n="ota.pageTitle">Firmware Update</h2>
+  <p class="notice"><strong data-i18n="ota.turnOffAuto">Turn off auto mode before uploading or deploying firmware.</strong></p>
 
-    <h3>Worker Firmware</h3>
-    <p><input id="workerFirmwareFile" type="file" accept=".ota,application/octet-stream"></p>
-    <p><button id="workerUploadButton" onclick="uploadWorkerFirmware()">Upload Worker Firmware</button></p>
-    <p><progress id="workerUploadProgress" value="0" max="100"></progress></p>
-    <p id="workerUploadStatus">Idle</p>
+  <section>
+    <h3 data-i18n="ota.main">Main</h3>
+    <div class="row"><span class="label" data-i18n="ota.installedVersion">Installed version:</span><span id="currentVersion">-</span></div>
+    <div class="row"><span class="label" data-i18n="ota.hardwareTarget">Hardware target:</span><span id="currentHardware">-</span></div>
+    <div class="actions"><input id="firmwareFile" type="file" accept=".ota,application/octet-stream"></div>
+    <div class="actions"><button id="uploadButton" onclick="uploadFirmware()" data-i18n="ota.uploadMain">Upload Firmware</button></div>
+    <div class="actions"><progress id="uploadProgress" value="0" max="100"></progress></div>
+    <p id="uploadStatus" class="meta" data-i18n="common.idle">Idle</p>
+  </section>
 
-    <h3>Workers</h3>
-    <table border="1" cellpadding="6">
-      <thead><tr><th>Name / MAC</th><th>Update</th><th>Status</th></tr></thead>
-      <tbody id="workerOtaRows"><tr><td colspan="3">Loading...</td></tr></tbody>
-    </table>
-    <p><a href="/">Home</a></p>
-  </center>
+  <section>
+    <h3 data-i18n="ota.workerFirmware">Worker Firmware</h3>
+    <div class="actions"><input id="workerFirmwareFile" type="file" accept=".ota,application/octet-stream"></div>
+    <div class="actions"><button id="workerUploadButton" onclick="uploadWorkerFirmware()" data-i18n="ota.uploadWorker">Upload Worker Firmware</button></div>
+    <div class="actions"><progress id="workerUploadProgress" value="0" max="100"></progress></div>
+    <p id="workerUploadStatus" class="meta" data-i18n="common.idle">Idle</p>
+  </section>
+
+  <section>
+    <h3 data-i18n="ota.workers">Workers</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th data-i18n="ota.nameMac">Name / MAC</th><th data-i18n="ota.installedVersionColumn">Installed version</th><th data-i18n="common.update">Update</th><th data-i18n="common.status">Status</th></tr></thead>
+      <tbody id="workerOtaRows"><tr><td colspan="4" data-i18n="common.loading">Loading...</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <p><a href="/" data-i18n="common.home">Home</a></p>
 
   <script>
+/*__I18N_MESSAGES__*/
 let uploading = false;
 let workerUploading = false;
 let workerUpdating = false;
+let currentLanguage = 'en';
+let pageBootstrapped = false;
+
+function hasTranslation(key, language = currentLanguage) {
+  return Object.prototype.hasOwnProperty.call(I18N_MESSAGES[language] || {}, key);
+}
+
+function t(key, values = {}) {
+  const catalog = I18N_MESSAGES[currentLanguage] || I18N_MESSAGES.en;
+  let text = catalog[key] ?? I18N_MESSAGES.en[key] ?? key;
+  return text.replace(/\{(\w+)\}/g, (match, name) =>
+    Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match);
+}
+
+function applyStaticTranslations() {
+  document.querySelectorAll('[data-i18n]').forEach(element => {
+    element.textContent = t(element.dataset.i18n);
+  });
+  document.documentElement.lang = currentLanguage;
+}
+
+function setLanguage(language) {
+  const next = Object.prototype.hasOwnProperty.call(I18N_MESSAGES, language) ? language : 'en';
+  if (currentLanguage === next && document.documentElement.lang === next) return false;
+  currentLanguage = next;
+  applyStaticTranslations();
+  return true;
+}
+
+function protocolErrorText(code, fallbackKey) {
+  if (code && hasTranslation('protocol.' + code)) return t('protocol.' + code);
+  return code || (fallbackKey ? t(fallbackKey) : '-');
+}
+
+function workerOtaStateText(state, percent = null, fallback = null) {
+  const key = 'state.workerOta.' + String(state || '').toLowerCase();
+  if (hasTranslation(key)) return t(key, {percent: percent === null ? 0 : Math.floor(percent)});
+  return fallback || state || t('state.workerOta.idle');
+}
 
 async function refreshStatus() {
   if (uploading || workerUploading) return;
+  let languageChanged = false;
   try {
     const response = await fetch('/ota/status', {cache:'no-store'});
     if (!response.ok) return;
     const result = await response.json();
+    languageChanged = setLanguage(result.language);
     document.getElementById('currentVersion').innerText = result.currentVersion ?? '-';
     document.getElementById('currentHardware').innerText = result.currentHardware ?? '-';
     if (result.state === 'failed') {
-      document.getElementById('uploadStatus').innerText = result.error || 'Update failed';
+      document.getElementById('uploadStatus').innerText = protocolErrorText(result.error, 'error.updateFailed');
     }
   } catch (e) {}
   await refreshWorkerOtaStatus();
+  await refreshWorkerVersions();
+  if (languageChanged && pageBootstrapped) await refreshWorkers();
 }
 
 function escapeHtml(value) {
   return String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function workerVersionText(value) {
+  return value == null ? t('common.unknown') : `v${value}`;
+}
+
+async function refreshWorkerVersions() {
+  try {
+    const response = await fetch('/nodes', {cache:'no-store'});
+    if (!response.ok) return;
+    const workers = await response.json();
+    if (!Array.isArray(workers)) return;
+    const versions = new Map(workers.map(worker => [worker.mac || '', worker.firmwareVersion]));
+    document.querySelectorAll('#workerOtaRows tr[data-mac]').forEach(row => {
+      const cell = row.querySelector('.workerFirmwareVersion');
+      if (cell && versions.has(row.dataset.mac)) {
+        cell.innerText = workerVersionText(versions.get(row.dataset.mac));
+      }
+    });
+  } catch (e) {}
 }
 
 async function refreshWorkers() {
@@ -61,21 +144,22 @@ async function refreshWorkers() {
     if (!response.ok) throw new Error('worker list failed');
     const workers = await response.json();
     if (!Array.isArray(workers) || workers.length === 0) {
-      body.innerHTML = '<tr><td colspan="3">No workers configured</td></tr>';
+      body.innerHTML = `<tr><td colspan="4">${escapeHtml(t('main.noWorkers'))}</td></tr>`;
       return;
     }
     body.innerHTML = '';
     for (const worker of workers) {
       const name = worker.workerName ? escapeHtml(worker.workerName) + '<br>' : '';
       const mac = escapeHtml(worker.mac || '');
+      const version = escapeHtml(workerVersionText(worker.firmwareVersion));
       const row = document.createElement('tr');
       row.dataset.mac = worker.mac || '';
-      row.innerHTML = `<td>${name}<code>${mac}</code></td><td><button onclick="startWorkerUpdate('${mac}')">Update</button></td><td class="workerOtaStatus"><span class="workerOtaStatusText">Idle</span><br><progress class="workerOtaProgress" value="0" max="100" hidden></progress></td>`;
+      row.innerHTML = `<td>${name}<code>${mac}</code></td><td class="workerFirmwareVersion">${version}</td><td><button class="secondary" onclick="startWorkerUpdate('${mac}')">${escapeHtml(t('common.update'))}</button></td><td class="workerOtaStatus"><span class="workerOtaStatusText">${escapeHtml(t('common.idle'))}</span><br><progress class="workerOtaProgress" value="0" max="100" hidden></progress></td>`;
       body.appendChild(row);
     }
     await refreshWorkerOtaStatus();
   } catch (e) {
-    body.innerHTML = '<tr><td colspan="3">Worker list unavailable</td></tr>';
+    body.innerHTML = `<tr><td colspan="4">${escapeHtml(t('error.workerListUnavailable'))}</td></tr>`;
   }
 }
 
@@ -101,7 +185,7 @@ async function refreshWorkerOtaStatus() {
     const result = await response.json();
     workerUpdating = !!result.active;
     setWorkerButtonsDisabled(workerUpdating);
-    const storedText = result.packageVersion ? `Stored worker firmware v${result.packageVersion}` : 'No worker firmware stored';
+    const storedText = result.packageVersion ? t('ota.storedWorkerFirmware', {version: result.packageVersion}) : t('ota.noWorkerFirmware');
     if (!workerUploading) document.getElementById('workerUploadStatus').innerText = storedText;
     if (result.targetMac) {
       const row = document.querySelector(`#workerOtaRows tr[data-mac="${result.targetMac}"]`);
@@ -111,11 +195,13 @@ async function refreshWorkerOtaStatus() {
         const expected = Number(result.expectedImageBytes) || 0;
         if (result.state === 'transferring' && expected > 0) {
           const percent = Math.min(100, sent * 100 / expected);
-          setWorkerStatus(cell, `Updating ${Math.floor(percent)}%`, percent);
+          setWorkerStatus(cell, workerOtaStateText(result.state, percent), percent);
         } else if (result.state === 'verifying' || result.state === 'rebooting' || result.state === 'done') {
-          setWorkerStatus(cell, result.message || result.state, 100);
+          setWorkerStatus(cell, workerOtaStateText(result.state, null, result.message), 100);
+        } else if (result.state === 'failed') {
+          setWorkerStatus(cell, protocolErrorText(result.message, 'state.workerOta.failed'));
         } else {
-          setWorkerStatus(cell, result.message || result.state || 'Updating');
+          setWorkerStatus(cell, workerOtaStateText(result.state, null, result.message));
         }
       }
     }
@@ -130,15 +216,15 @@ function uploadFirmware() {
   const progress = document.getElementById('uploadProgress');
   const status = document.getElementById('uploadStatus');
   if (!file) {
-    status.innerText = 'Select an OTA package';
+    status.innerText = t('ota.selectMainPackage');
     return;
   }
-  if (!confirm('Install this firmware and reboot the main node?')) return;
+  if (!confirm(t('confirm.installMainFirmware'))) return;
 
   uploading = true;
   button.disabled = true;
   progress.value = 0;
-  status.innerText = 'Uploading...';
+  status.innerText = t('status.uploading');
 
   const request = new XMLHttpRequest();
   request.open('POST', '/ota/main');
@@ -150,16 +236,16 @@ function uploadFirmware() {
     try { result = JSON.parse(request.responseText || '{}'); } catch (e) {}
     if (request.status >= 200 && request.status < 300) {
       progress.value = 100;
-      status.innerText = 'Verified. Rebooting...';
+      status.innerText = t('status.verifiedRebooting');
     } else {
-      status.innerText = result.error || 'Update failed';
+      status.innerText = protocolErrorText(result.error, 'error.updateFailed');
       uploading = false;
       button.disabled = false;
       refreshStatus();
     }
   };
   request.onerror = () => {
-    status.innerText = 'Upload connection failed';
+    status.innerText = t('error.uploadConnectionFailed');
     uploading = false;
     button.disabled = false;
   };
@@ -177,14 +263,14 @@ function uploadWorkerFirmware() {
   const progress = document.getElementById('workerUploadProgress');
   const status = document.getElementById('workerUploadStatus');
   if (!file) {
-    status.innerText = 'Select a worker OTA package';
+    status.innerText = t('ota.selectWorkerPackage');
     return;
   }
 
   workerUploading = true;
   button.disabled = true;
   progress.value = 0;
-  status.innerText = 'Uploading worker firmware...';
+  status.innerText = t('status.uploadingWorker');
 
   const request = new XMLHttpRequest();
   request.open('POST', '/ota/worker');
@@ -196,16 +282,16 @@ function uploadWorkerFirmware() {
     try { result = JSON.parse(request.responseText || '{}'); } catch (e) {}
     if (request.status >= 200 && request.status < 300) {
       progress.value = 100;
-      status.innerText = 'Worker firmware stored';
+      status.innerText = t('status.workerFirmwareStored');
     } else {
-      status.innerText = result.error || 'Worker firmware upload failed';
+      status.innerText = protocolErrorText(result.error, 'error.workerFirmwareUploadFailed');
     }
     workerUploading = false;
     button.disabled = false;
     refreshWorkerOtaStatus();
   };
   request.onerror = () => {
-    status.innerText = 'Worker firmware upload connection failed';
+    status.innerText = t('error.workerUploadConnectionFailed');
     workerUploading = false;
     button.disabled = false;
   };
@@ -219,7 +305,7 @@ async function startWorkerUpdate(mac) {
   if (!mac || workerUpdating) return;
   const row = document.querySelector(`#workerOtaRows tr[data-mac="${mac}"]`);
   const cell = row ? row.querySelector('.workerOtaStatus') : null;
-  setWorkerStatus(cell, 'Starting...');
+  setWorkerStatus(cell, t('status.starting'));
   setWorkerButtonsDisabled(true);
   try {
     const response = await fetch('/ota/worker/start', {
@@ -229,21 +315,28 @@ async function startWorkerUpdate(mac) {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
-      setWorkerStatus(cell, result.error || 'Start failed');
+      setWorkerStatus(cell, protocolErrorText(result.error, 'error.startFailed'));
       setWorkerButtonsDisabled(false);
       return;
     }
     workerUpdating = true;
-    setWorkerStatus(cell, 'Queued');
+    setWorkerStatus(cell, t('status.queued'));
   } catch (e) {
-    setWorkerStatus(cell, 'Start failed');
+    setWorkerStatus(cell, t('error.startFailed'));
     setWorkerButtonsDisabled(false);
   }
 }
 
-refreshStatus();
-refreshWorkers();
-setInterval(refreshStatus, 2000);
+applyStaticTranslations();
+
+async function bootstrap() {
+  await refreshStatus();
+  await refreshWorkers();
+  pageBootstrapped = true;
+  setInterval(refreshStatus, 2000);
+}
+
+bootstrap();
 </script>
 </body>
 </html>

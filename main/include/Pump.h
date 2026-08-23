@@ -4,3 +4,4 @@
 void pumpBegin();
 void pumpOn();
 void pumpOff();
+bool pumpIsOn();

@@ -76,10 +76,6 @@ bool applyEpochCorrection(uint64_t newEpochSec, ClockSource source,
   if (expectedNtpGeneration != 0) stopNtp();
   int64_t nowUs = esp_timer_get_time();
   uint64_t oldNowUtc = currentEpochLocked(nowUs);
-  Settings settings{};
-  getSettingsSnapshot(settings);
-  uint64_t rebasedLastWatering = clockRebaseTimestampPreservingAge(
-      oldNowUtc, newEpochSec, settings.lastWateringUtcSec);
 
   gClockBaseUtc = newEpochSec;
   gClockBaseUs = nowUs;
@@ -91,14 +87,11 @@ bool applyEpochCorrection(uint64_t newEpochSec, ClockSource source,
     gNtpSyncError[0] = '\0';
   }
   setSystemEpoch(newEpochSec);
-  if (rebasedLastWatering != settings.lastWateringUtcSec) {
-    setLastWateringUtc(rebasedLastWatering);
-  }
+  rebaseLastAutoWateringTimestamps(oldNowUtc, newEpochSec);
   setSavedUtc(newEpochSec, saveImmediately);
   xSemaphoreGive(gClockMutex);
-  LOG("Clock corrected source=%s utc=%llu last_watering=%llu",
-      clockSourceName(source), static_cast<unsigned long long>(newEpochSec),
-      static_cast<unsigned long long>(rebasedLastWatering));
+  LOG("Clock corrected source=%s utc=%llu watering_history_rebased=1",
+      clockSourceName(source), static_cast<unsigned long long>(newEpochSec));
   return true;
 }
 
@@ -310,14 +303,6 @@ bool clockIsValid() {
   bool valid = gClockSource != ClockSource::UNINITIALIZED && gClockBaseUtc != 0;
   xSemaphoreGive(gClockMutex);
   return valid;
-}
-
-void clockRecordLastWateringNow() {
-  ensureClockMutex();
-  xSemaphoreTake(gClockMutex, portMAX_DELAY);
-  uint64_t utc = currentEpochLocked(esp_timer_get_time());
-  if (utc != 0) setLastWateringUtc(utc);
-  xSemaphoreGive(gClockMutex);
 }
 
 void clockGetStatus(ClockStatusSnapshot& out) {

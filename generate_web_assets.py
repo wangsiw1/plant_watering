@@ -1,6 +1,8 @@
 Import("env")
 
 import gzip
+import json
+import re
 from pathlib import Path
 
 
@@ -8,6 +10,68 @@ ASSETS = (
     ("root.html", "ROOT_HTML_GZ"),
     ("ota.html", "OTA_HTML_GZ"),
 )
+LOCALES = ("en", "zh-CN")
+LOCALE_MARKER = "/*__I18N_MESSAGES__*/"
+
+
+def load_json_object(path):
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate translation key {key!r} in {path}")
+            result[key] = value
+        return result
+
+    try:
+        with path.open("r", encoding="utf-8") as source:
+            value = json.load(source, object_pairs_hook=reject_duplicate_keys)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise RuntimeError(f"Invalid locale file {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Locale file must contain a JSON object: {path}")
+    non_strings = sorted(key for key, text in value.items()
+                         if not isinstance(key, str) or not isinstance(text, str))
+    if non_strings:
+        raise RuntimeError(
+            f"Locale values must be strings in {path}: {', '.join(non_strings)}")
+    return value
+
+
+def build_locale_script(locales_dir):
+    catalogs = {
+        locale: load_json_object(locales_dir / f"{locale}.json")
+        for locale in LOCALES
+    }
+    english_keys = set(catalogs["en"])
+    for locale in LOCALES[1:]:
+        locale_keys = set(catalogs[locale])
+        missing = sorted(english_keys - locale_keys)
+        extra = sorted(locale_keys - english_keys)
+        if missing or extra:
+            details = []
+            if missing:
+                details.append("missing: " + ", ".join(missing))
+            if extra:
+                details.append("extra: " + ", ".join(extra))
+            raise RuntimeError(
+                f"Locale key mismatch for {locale}: {'; '.join(details)}")
+        placeholder_mismatches = []
+        for key in sorted(english_keys):
+            english_placeholders = set(re.findall(r"\{(\w+)\}", catalogs["en"][key]))
+            locale_placeholders = set(re.findall(r"\{(\w+)\}", catalogs[locale][key]))
+            if english_placeholders != locale_placeholders:
+                placeholder_mismatches.append(key)
+        if placeholder_mismatches:
+            raise RuntimeError(
+                f"Locale placeholder mismatch for {locale}: "
+                + ", ".join(placeholder_mismatches))
+    encoded = json.dumps(catalogs, ensure_ascii=False,
+                         separators=(",", ":"), sort_keys=True)
+    encoded = (encoded.replace("<", "\\u003c")
+               .replace("\u2028", "\\u2028")
+               .replace("\u2029", "\\u2029"))
+    return f"const I18N_MESSAGES={encoded};"
 
 
 def byte_array(data):
@@ -21,6 +85,7 @@ def byte_array(data):
 project_dir = Path(env.subst("$PROJECT_DIR"))
 build_dir = Path(env.subst("$BUILD_DIR"))
 web_dir = project_dir / "web"
+locale_script = build_locale_script(web_dir / "locales")
 generated_path = build_dir / "generated_web_assets.h"
 
 sections = [
@@ -36,7 +101,15 @@ for filename, symbol in ASSETS:
     source_path = web_dir / filename
     if not source_path.is_file():
         raise RuntimeError(f"Required web asset is missing: {source_path}")
-    raw = source_path.read_bytes()
+    try:
+        source = source_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise RuntimeError(f"Unable to read web asset {source_path}: {error}") from error
+    marker_count = source.count(LOCALE_MARKER)
+    if marker_count != 1:
+        raise RuntimeError(
+            f"Expected exactly one locale marker in {source_path}, found {marker_count}")
+    raw = source.replace(LOCALE_MARKER, locale_script).encode("utf-8")
     if not raw:
         raise RuntimeError(f"Required web asset is empty: {source_path}")
 

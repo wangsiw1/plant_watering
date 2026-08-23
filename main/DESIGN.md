@@ -41,22 +41,39 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
 - mDNS
   - Default settings
   - Domain name: plant-watering-\<WIFI_MAC_LAST_6_HEX\>.local
+  - Initialize once and follow WiFi/IP events across reconnects; retry only if
+    initial mDNS setup failed
 
 - WiFiProvisioner
   - Default settings
+  - On an eligible crash recovery with saved credentials, a connection timeout
+    skips blocking provisioning so automation can boot offline and WiFi can
+    reconnect in the background
+  - All other failed startup connections retain the blocking provisioning flow
 
 - ArduinoOTA
-  - Default settings
+  - Main and worker OTA uploads and worker deployment require auto mode to be
+    turned off first
+  - Reject enabling auto mode while an OTA operation is active
+  - Main and worker builds define a nonzero `FW_MIN_ALLOWED_VERSION` no greater
+    than their own `FW_VERSION`
+  - Reject packages below that role-specific minimum and reject reinstalling
+    the currently running version; allow upgrades and rollbacks down to the floor
+
+- Auto mode recovery
+  - Keep the armed intent in validated RTC no-init memory, not NVS
+  - Resume only after panic, interrupt-watchdog, task-watchdog, or other
+    watchdog resets and only after normal startup initialization completes
+  - Power-on, brownout, external, software/OTA, deep-sleep, SDIO, and unknown
+    reset reasons always start in manual mode
 
 - Web UI (Minimum style while easy to view)
   - Each input below has a tooltip explain the usage 
   - Title/header ("Plant Watering (\<name\>)", name is \<WIFI_MAC_LAST_6_HEX\> by default)
   - Name input (255 char max, empty by default. If non-empty, replace name in title)
   - Current time (hour:minute), and input to set manually
-  - Last watering time(days/hours/minuts ago)
   - Water tank info from sensor: High/Low
   - Time range input of watering activation: 24-hour start and end
-  - Interval of watering input (seconds with hardcoded min/max)
   - Interval of data sync input (seconds with hardcoded min/max)
   - Button to manually activate pump
   - Button to apply all changes
@@ -67,12 +84,37 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
     - Worker header shows MAC address, battery percentage, last sync time, and RSSI
     - Worker name input
     - Remove button removes the whole worker device from the list
-    - Each pot row shows soil moisture data, last watering time, threshold, watering duration, and a manual watering button
+    - Each pot row shows soil moisture data, persistent last automatic watering time, threshold, watering duration, watering interval, and a manual watering button
     - Pot name and worker name are stored in fixed 65-byte buffers, so the web UI clamps names to 64 UTF-8 bytes total, which is about 64 ASCII characters or about 16 4-byte emoji/CJK characters
   - Callapsed log list and system health info
 
 - Hardware
   - Main firmware supports multiple hardware targets selected at build time
+  - Main-device status LED
+    - GPIO 8, active-low, onboard single-color blue LED
+    - Driven by LEDC channel 0 at 5 kHz with 8-bit PWM resolution
+    - The status controller updates every 20 ms in an independent low-priority
+      FreeRTOS task, including while WiFi provisioning blocks the main setup
+      flow
+    - Display priority is logical and independent of FreeRTOS task priority:
+      OTA update, low water tank, WiFi, watering, worker synchronization, then
+      normal/idle
+    - Main or worker OTA: 100 ms on and 100 ms off continuously (5 flashes per
+      second)
+    - Low tank (at or below 2800 mV): 500 ms on and 500 ms off continuously
+      (1 flashes per second)
+    - WiFi provisioning, initial connection, or reconnection: cosine-eased
+      breathing over 2 seconds, from 10% PWM brightness at 0 ms to 70% at
+      1000 ms and back to 10% at 2000 ms
+    - WiFi connected: one 250 ms full-brightness confirmation flash, then off
+      or the next applicable lower-priority state
+    - Watering or manual pump active: three 100 ms flashes separated by 100 ms off,
+      followed by 1500 ms off; repeat every 2 seconds
+    - Worker synchronization: two 100 ms flashes separated by 100 ms off,
+      followed by 1700 ms off; repeat every 2 seconds
+    - Normal/idle: off
+    - Pattern intervals are half-open and a newly selected highest-priority
+      pattern restarts at its first phase
   - `HW_TARGET_V1_REV_A`
     - Pump activation pin: GPIO 1
     - Water tank level sensor reading pin: GPIO 3
@@ -90,7 +132,7 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
     - Advance time from the 64-bit monotonic ESP timer and accept that elapsed time while fully powered off may be lost
     - Checkpoint approximate time every six hours and before an intentional main-controller OTA reboot
     - NTP synchronization is asynchronous and attempted at startup, after WiFi reconnect, after reset while connected, or by explicit user request; failure never invalidates the current clock
-    - Preserve elapsed time since last watering when manual or NTP correction changes the hidden epoch
+    - Preserve elapsed time since each pot's last automatic watering when manual or NTP correction changes the hidden epoch
     - Use this current time for watering time range when auto watering is enabled
   - Wifi
     - If WiFiProvisioner could not connect to any Wifi, setup on board Wifi, allow users connecting to ESP32 C3's AP and access HTTP server through default IP/mDNS
@@ -105,12 +147,14 @@ Goal: As a main device, it will have a non contact capacitive water level sensor
       - Disable valve activation button
       - Only activate if water tank level is not low
       - Only activate during active time range
-      - Only activate after watering interval
-      - Only activate if one or more reported soil moisture is above threshold
+      - Only activate a pot after that pot's watering interval
+      - Only activate a pot if its reported soil moisture is above its threshold
       - Soil sensor ADC value increases as the soil gets drier
   - Watering interval
-    - Cooldown timer that no watering triggers
-    - Starts from end of last watering
+    - Per-pot cooldown timer that prevents that pot from automatic watering
+    - Starts from the end of the last successful automatic watering batch containing that pot
+    - Manual watering does not reset the automatic cooldown
+    - Pots are evaluated only on data sync cycles, so the effective interval is also limited by the data sync interval
     - Minimum: 60 seconds
     - Maximum: 2,419,200 seconds (28 days)
     - Default: 3600 seconds (1 hour)
@@ -230,7 +274,9 @@ fields encoded as `[field type:1][length:1][value:length]`; integers are big-end
 - `0x30 TYPE_CMD_PROBE`: no TLV fields.
 - `0x31 TYPE_CMD_SLEEP`: `FIELD_SLEEP_SEC` as one `uint32`.
 - `0x32 TYPE_CMD_WATER`: `FIELD_POT_MASK` plus `FIELD_DURATION_LIST`.
-- `0x40 TYPE_STATUS`: battery, pot count, and the ordered `uint16` soil list.
+- `0x40 TYPE_STATUS`: battery, pot count, the ordered `uint16` soil list, and
+  optional `FIELD_FW_VERSION` (`0x07`) as one `uint32`. Main treats a missing
+  version from legacy workers as unknown and keeps it only in runtime memory.
 - `0x41 TYPE_CONFIG`: reserved placeholder; it is not currently transmitted.
 - `0x42 TYPE_EVENT_WATER_DONE`: the completed pot mask.
 
@@ -269,6 +315,4 @@ placeholder and must be provisioned securely for a production deployment.
 - `TYPE_CONFIG`, heap monitoring, and the incomplete 16-pot hardware target remain.
 - Main and worker retain separate copies of Bluetooth common and crypto sources so each
   firmware directory remains independently manageable.
-
-
 
