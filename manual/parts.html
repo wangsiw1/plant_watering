@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plant-Watering Parts List</title>
+  <meta name="description" content="Picture, name, and specifications for parts used with the plant-watering devices.">
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17312a;
+      --muted: #5d6d67;
+      --line: #c9d7d1;
+      --soft: #f2f7f5;
+      --accent: #16795b;
+      --accent-dark: #0d5b43;
+      --paper: #ffffff;
+      --notice: #fff8df;
+      --notice-line: #d9aa27;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      background: #eaf1ee;
+      color: var(--ink);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    body {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px;
+      background: var(--paper);
+      box-shadow: 0 0 28px rgba(24, 55, 45, 0.1);
+    }
+
+    header {
+      padding-bottom: 20px;
+      border-bottom: 3px solid var(--accent);
+    }
+
+    .eyebrow {
+      margin: 0 0 6px;
+      color: var(--accent-dark);
+      font-size: 0.8rem;
+      font-weight: 750;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2rem, 5vw, 3.15rem);
+      line-height: 1.1;
+    }
+
+    .intro {
+      max-width: 780px;
+      margin: 14px 0 0;
+      color: var(--muted);
+      font-size: 1.05rem;
+    }
+
+    .notice {
+      margin: 24px 0;
+      padding: 14px 18px;
+      border: 1px solid var(--notice-line);
+      border-left: 5px solid var(--notice-line);
+      border-radius: 8px;
+      background: var(--notice);
+    }
+
+    .notice strong { color: #6d5000; }
+
+    .parts-list {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+
+    .parts-head,
+    .part {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) minmax(150px, 0.8fr) minmax(280px, 1.55fr);
+    }
+
+    .parts-head {
+      background: var(--accent-dark);
+      color: #fff;
+      font-weight: 750;
+    }
+
+    .parts-head > div,
+    .part > div {
+      min-width: 0;
+      padding: 16px;
+    }
+
+    .parts-head > div + div,
+    .part > div + div {
+      border-left: 1px solid var(--line);
+    }
+
+    .part + .part { border-top: 1px solid var(--line); }
+    .part:nth-child(even) { background: var(--soft); }
+
+    .photo-placeholder {
+      display: grid;
+      min-height: 128px;
+      place-items: center;
+      padding: 18px;
+      border: 2px dashed #9eafa8;
+      border-radius: 8px;
+      background: #fff;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .picture-cell {
+      display: grid;
+      align-items: center;
+    }
+
+    .part-photo {
+      display: block;
+      width: 100%;
+      max-height: 220px;
+      object-fit: contain;
+    }
+
+    .part-name {
+      color: var(--accent-dark);
+      font-size: 1.05rem;
+      font-weight: 750;
+    }
+
+    .specs {
+      margin: 0;
+      padding-left: 1.2rem;
+    }
+
+    .specs li + li { margin-top: 4px; }
+
+    footer {
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 720px) {
+      body { padding: 20px 14px; }
+      .parts-list { border: 0; }
+      .parts-head { display: none; }
+
+      .part {
+        display: block;
+        overflow: hidden;
+        margin-bottom: 18px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #fff;
+      }
+
+      .part + .part { border-top: 1px solid var(--line); }
+      .part:nth-child(even) { background: #fff; }
+      .part > div + div { border-left: 0; border-top: 1px solid var(--line); }
+
+      .part > div::before {
+        display: block;
+        margin-bottom: 7px;
+        color: var(--muted);
+        font-size: 0.75rem;
+        font-weight: 750;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .picture-cell::before { content: "Picture"; }
+      .name-cell::before { content: "Name"; }
+      .spec-cell::before { content: "Specifications"; }
+    }
+
+    @media print {
+      @page { margin: 12mm; }
+
+      html { background: #fff; }
+
+      body {
+        max-width: none;
+        padding: 0;
+        box-shadow: none;
+        font-size: 9.5pt;
+      }
+
+      header { padding-bottom: 10px; }
+      .notice { margin: 12px 0; }
+      .parts-list { overflow: visible; }
+      .parts-head, .part { grid-template-columns: 27% 23% 50%; }
+      .parts-head > div, .part > div { padding: 8px; }
+      .part { break-inside: avoid; page-break-inside: avoid; }
+      .photo-placeholder { min-height: 72px; }
+      .part-photo { max-height: 110px; }
+      footer { margin-top: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <p class="eyebrow">Parts reference</p>
+    <h1>Plant-Watering Parts List</h1>
+    <p class="intro">Parts used with the plant-watering devices. Available product photos are shown; placeholders mark photos that still need to be added.</p>
+  </header>
+
+  <aside class="notice" aria-label="Pipe-size note">
+    <strong>How to read pipe sizes:</strong> a size such as 9/12 mm means 9 mm inner diameter and 12 mm outer diameter. Check both measurements before connecting a pipe. Adapter numbers describe the supported pipe inner diameter.
+  </aside>
+
+  <main>
+    <section class="parts-list" aria-label="Parts and specifications">
+      <div class="parts-head" aria-hidden="true">
+        <div>Picture</div>
+        <div>Name</div>
+        <div>Specifications</div>
+      </div>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_9_12.jpg" alt="9 mm inner and 12 mm outer diameter pipe"></div>
+        <div class="name-cell"><div class="part-name">Pipe</div></div>
+        <div class="spec-cell"><ul class="specs"><li>9 mm inner diameter</li><li>12 mm outer diameter</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_4_7.jpg" alt="4 mm inner and 7 mm outer diameter pipe"></div>
+        <div class="name-cell"><div class="part-name">Pipe</div></div>
+        <div class="spec-cell"><ul class="specs"><li>4 mm or 5 mm inner diameter</li><li>7 mm outer diameter</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><div class="photo-placeholder" role="img" aria-label="Photo placeholder for 7 by 10 millimetre pipe">Photo to be added</div></div>
+        <div class="name-cell"><div class="part-name">Pipe</div></div>
+        <div class="spec-cell"><ul class="specs"><li>7 mm inner diameter</li><li>10 mm outer diameter</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_adapter_064_087.jpg" alt="064 to 087 pipe adapter"></div>
+        <div class="name-cell"><div class="part-name">Pipe adapter</div></div>
+        <div class="spec-cell"><ul class="specs"><li>064 end: pipe inner diameter from 4.8 to 6.4 mm</li><li>087 end: pipe inner diameter from 6.4 to 8.7 mm</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_adapter_048_087.jpg" alt="048 to 087 pipe adapter"></div>
+        <div class="name-cell"><div class="part-name">Pipe adapter</div></div>
+        <div class="spec-cell"><ul class="specs"><li>048 end: pipe inner diameter from 4.0 to 4.8 mm</li><li>087 end: pipe inner diameter from 6.4 to 8.7 mm</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_adapter_048_064.jpg" alt="048 to 064 pipe adapter"></div>
+        <div class="name-cell"><div class="part-name">Pipe adapter</div></div>
+        <div class="spec-cell"><ul class="specs"><li>048 end: pipe inner diameter from 4.0 to 4.8 mm</li><li>064 end: pipe inner diameter from 4.8 to 6.4 mm</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_splitter_064.jpg" alt="064 pipe splitter"></div>
+        <div class="name-cell"><div class="part-name">Pipe splitter</div></div>
+        <div class="spec-cell"><ul class="specs"><li>For pipe with an inner diameter from 4.8 to 6.4 mm (064)</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_holder_9_12.jpg" alt="Holder for 9 mm inner and 12 mm outer diameter pipe"></div>
+        <div class="name-cell"><div class="part-name">Pipe holder</div></div>
+        <div class="spec-cell"><ul class="specs"><li>For 9 mm inner / 12 mm outer diameter pipe</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_holder_4_7.jpg" alt="Holder for 4 mm inner and 7 mm outer diameter pipe"></div>
+        <div class="name-cell"><div class="part-name">Pipe holder</div></div>
+        <div class="spec-cell"><ul class="specs"><li>For 4 mm inner / 7 mm outer diameter pipe</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/three_way_valve_9_12.jpg" alt="Three-way valve for 9 mm inner and 12 mm outer diameter pipe"></div>
+        <div class="name-cell"><div class="part-name">Three-way valve</div></div>
+        <div class="spec-cell"><ul class="specs"><li>5 V, 0.93 A</li><li>For 9 mm inner / 12 mm outer diameter pipe</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/three_way_valve_4_7.jpg" alt="Three-way valve for 4 mm inner and 7 mm outer diameter pipe"></div>
+        <div class="name-cell"><div class="part-name">Three-way valve</div></div>
+        <div class="spec-cell"><ul class="specs"><li>5 V, approximately 1 A</li><li>For 4 mm inner / 7 mm outer diameter pipe</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/ball_valve_8_8.jpg" alt="Ball valve for pipe with an inner diameter from 6.4 to 8.7 mm"></div>
+        <div class="name-cell"><div class="part-name">Ball valve</div></div>
+        <div class="spec-cell"><ul class="specs"><li>For pipe with an inner diameter from 6.4 to 8.7 mm</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pump.jpg" alt="12 volt water pump"></div>
+        <div class="name-cell"><div class="part-name">Water pump</div></div>
+        <div class="spec-cell"><ul class="specs"><li>12 V, 4.8 W, 0.4 A</li><li>For 7 mm inner / 10 mm outer diameter pipe</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/parts/Capacitive-Soil-Moisture-Sensor-Module-V2_0.jpg" alt="Version 2.0 soil moisture sensor"></div>
+        <div class="name-cell"><div class="part-name">Soil moisture sensor</div></div>
+        <div class="spec-cell"><ul class="specs"><li>Version 2.0</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/water_level_sensor.jpg" alt="Customized water level sensor"></div>
+        <div class="name-cell"><div class="part-name">Water level sensor</div></div>
+        <div class="spec-cell"><ul class="specs"><li>Customized model</li><li>High-voltage output when water is detected</li><li>Low-voltage output when water is not detected</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/xh254_3pins_m_to_m.jpg" alt="Three-pin male-to-male XH2.54 cable"></div>
+        <div class="name-cell"><div class="part-name">XH2.54 cable</div></div>
+        <div class="spec-cell"><ul class="specs"><li>Male to male</li><li>3 pins</li><li>Same wire order at both ends</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/xh254_3pins_m_to_f.jpg" alt="Three-pin male-to-female XH2.54 cable"></div>
+        <div class="name-cell"><div class="part-name">XH2.54 cable</div></div>
+        <div class="spec-cell"><ul class="specs"><li>Male to female</li><li>3 pins</li><li>Same wire order at both ends</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/xh254_4pins_m_to_f.jpg" alt="Four-pin male-to-female XH2.54 cable"></div>
+        <div class="name-cell"><div class="part-name">XH2.54 cable</div></div>
+        <div class="spec-cell"><ul class="specs"><li>Male to female</li><li>4 pins</li><li>Same wire order at both ends</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/ph20_2pins_m_to_f.jpg" alt="Two-pin male-to-female PH2.0 cable"></div>
+        <div class="name-cell"><div class="part-name">PH2.0 cable</div></div>
+        <div class="spec-cell"><ul class="specs"><li>Male to female</li><li>2 pins</li><li>Same wire order at both ends</li></ul></div>
+      </article>
+    </section>
+  </main>
+
+  <footer>
+    Plant-watering system · Parts reference
+  </footer>
+</body>
+</html>

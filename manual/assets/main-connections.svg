@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 330" role="img" aria-labelledby="title desc">
+  <title id="title">V2 main controller connection overview</title>
+  <desc id="desc">Conceptual connection diagram for the 12 volt one amp center-positive supply, tank sensor, 12 volt five watt pump, reservoir, and watering line. Physical connector orientation is intentionally not shown.</desc>
+  <defs>
+    <style>
+      .board{fill:#25372d;stroke:#13231a;stroke-width:4}.port{fill:#fff;stroke:#dbe5dc;stroke-width:3}
+      .device{fill:#eef7f0;stroke:#287a43;stroke-width:3}.water{fill:#eef7fb;stroke:#2d7f9d;stroke-width:3}
+      .wire{fill:none;stroke:#475569;stroke-width:5}.tube{fill:none;stroke:#2d7f9d;stroke-width:8}
+      .title{font:700 22px system-ui,sans-serif;fill:#fff;text-anchor:middle}.label{font:600 18px system-ui,sans-serif;fill:#17261d;text-anchor:middle}
+      .small{font:15px system-ui,sans-serif;fill:#475569;text-anchor:middle}
+    </style>
+  </defs>
+  <rect class="board" x="300" y="55" width="320" height="220" rx="22"/>
+  <text class="title" x="460" y="95">V2 MAIN</text>
+  <rect class="port" x="285" y="120" width="90" height="45" rx="8"/><text class="label" x="330" y="149">12V IN</text>
+  <rect class="port" x="410" y="250" width="100" height="45" rx="8"/><text class="label" x="460" y="279">PUMP</text>
+  <rect class="port" x="545" y="120" width="90" height="45" rx="8"/><text class="label" x="590" y="149">TANK</text>
+
+  <rect class="device" x="35" y="105" width="180" height="75" rx="14"/><text class="label" x="125" y="137">12 V adapter</text><text class="small" x="125" y="162">1 A · center positive</text>
+  <path class="wire" d="M215 143h70"/>
+
+  <rect class="water" x="705" y="40" width="180" height="105" rx="16"/><text class="label" x="795" y="80">Water tank</text><text class="small" x="795" y="108">External level sensor</text>
+  <path class="wire" d="M635 143l70-40"/>
+
+  <rect class="device" x="690" y="220" width="150" height="75" rx="14"/><text class="label" x="765" y="253">12 V pump</text><text class="small" x="765" y="278">5 W · 240 L/h</text>
+  <path class="wire" d="M510 272h180"/>
+  <path class="tube" d="M795 145v75"/>
+  <path class="tube" d="M840 258h55"/>
+  <text class="small" x="865" y="242">To valves</text>
+  <text class="small" x="460" y="325">Concept only — use a 12 V, 1 A, center-positive supply and follow the product labels.</text>
+</svg>

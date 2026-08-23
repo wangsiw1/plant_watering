@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>植物浇水系统配件清单</title>
+  <meta name="description" content="植物浇水设备所用配件的图片、名称和规格。">
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17312a;
+      --muted: #5d6d67;
+      --line: #c9d7d1;
+      --soft: #f2f7f5;
+      --accent: #16795b;
+      --accent-dark: #0d5b43;
+      --paper: #ffffff;
+      --notice: #fff8df;
+      --notice-line: #d9aa27;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      background: #eaf1ee;
+      color: var(--ink);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.7;
+    }
+
+    body {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px;
+      background: var(--paper);
+      box-shadow: 0 0 28px rgba(24, 55, 45, 0.1);
+    }
+
+    header {
+      padding-bottom: 20px;
+      border-bottom: 3px solid var(--accent);
+    }
+
+    .eyebrow {
+      margin: 0 0 6px;
+      color: var(--accent-dark);
+      font-size: 0.8rem;
+      font-weight: 750;
+      letter-spacing: 0.08em;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2rem, 5vw, 3.15rem);
+      line-height: 1.2;
+    }
+
+    .intro {
+      max-width: 780px;
+      margin: 14px 0 0;
+      color: var(--muted);
+      font-size: 1.05rem;
+    }
+
+    .notice {
+      margin: 24px 0;
+      padding: 14px 18px;
+      border: 1px solid var(--notice-line);
+      border-left: 5px solid var(--notice-line);
+      border-radius: 8px;
+      background: var(--notice);
+    }
+
+    .notice strong { color: #6d5000; }
+
+    .parts-list {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+
+    .parts-head,
+    .part {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) minmax(150px, 0.8fr) minmax(280px, 1.55fr);
+    }
+
+    .parts-head {
+      background: var(--accent-dark);
+      color: #fff;
+      font-weight: 750;
+    }
+
+    .parts-head > div,
+    .part > div {
+      min-width: 0;
+      padding: 16px;
+    }
+
+    .parts-head > div + div,
+    .part > div + div {
+      border-left: 1px solid var(--line);
+    }
+
+    .part + .part { border-top: 1px solid var(--line); }
+    .part:nth-child(even) { background: var(--soft); }
+
+    .photo-placeholder {
+      display: grid;
+      min-height: 128px;
+      place-items: center;
+      padding: 18px;
+      border: 2px dashed #9eafa8;
+      border-radius: 8px;
+      background: #fff;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .picture-cell {
+      display: grid;
+      align-items: center;
+    }
+
+    .part-photo {
+      display: block;
+      width: 100%;
+      max-height: 220px;
+      object-fit: contain;
+    }
+
+    .part-name {
+      color: var(--accent-dark);
+      font-size: 1.05rem;
+      font-weight: 750;
+    }
+
+    .specs {
+      margin: 0;
+      padding-left: 1.2rem;
+    }
+
+    .specs li + li { margin-top: 4px; }
+
+    footer {
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 720px) {
+      body { padding: 20px 14px; }
+      .parts-list { border: 0; }
+      .parts-head { display: none; }
+
+      .part {
+        display: block;
+        overflow: hidden;
+        margin-bottom: 18px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #fff;
+      }
+
+      .part + .part { border-top: 1px solid var(--line); }
+      .part:nth-child(even) { background: #fff; }
+      .part > div + div { border-left: 0; border-top: 1px solid var(--line); }
+
+      .part > div::before {
+        display: block;
+        margin-bottom: 7px;
+        color: var(--muted);
+        font-size: 0.75rem;
+        font-weight: 750;
+        letter-spacing: 0.06em;
+      }
+
+      .picture-cell::before { content: "图片"; }
+      .name-cell::before { content: "名称"; }
+      .spec-cell::before { content: "规格"; }
+    }
+
+    @media print {
+      @page { margin: 12mm; }
+
+      html { background: #fff; }
+
+      body {
+        max-width: none;
+        padding: 0;
+        box-shadow: none;
+        font-size: 9.5pt;
+      }
+
+      header { padding-bottom: 10px; }
+      .notice { margin: 12px 0; }
+      .parts-list { overflow: visible; }
+      .parts-head, .part { grid-template-columns: 27% 23% 50%; }
+      .parts-head > div, .part > div { padding: 8px; }
+      .part { break-inside: avoid; page-break-inside: avoid; }
+      .photo-placeholder { min-height: 72px; }
+      .part-photo { max-height: 110px; }
+      footer { margin-top: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <p class="eyebrow">配件参考</p>
+    <h1>植物浇水系统配件清单</h1>
+    <p class="intro">植物浇水设备所用的配件。已有的产品图片显示在清单中；仍待补充的图片以占位框标出。</p>
+  </header>
+
+  <aside class="notice" aria-label="水管尺寸说明">
+    <strong>如何理解水管尺寸：</strong>例如，9/12 毫米表示内径 9 毫米、外径 12 毫米。连接水管前，请核对这两个尺寸。转接头编号表示其适用的水管内径。
+  </aside>
+
+  <main>
+    <section class="parts-list" aria-label="配件及其规格">
+      <div class="parts-head" aria-hidden="true">
+        <div>图片</div>
+        <div>名称</div>
+        <div>规格</div>
+      </div>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_9_12.jpg" alt="内径 9 毫米、外径 12 毫米的水管"></div>
+        <div class="name-cell"><div class="part-name">水管</div></div>
+        <div class="spec-cell"><ul class="specs"><li>内径 9 毫米</li><li>外径 12 毫米</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_4_7.jpg" alt="内径 4 毫米、外径 7 毫米的水管"></div>
+        <div class="name-cell"><div class="part-name">水管</div></div>
+        <div class="spec-cell"><ul class="specs"><li>内径 4 毫米或 5 毫米</li><li>外径 7 毫米</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><div class="photo-placeholder" role="img" aria-label="7/10 毫米水管的图片占位">待添加图片</div></div>
+        <div class="name-cell"><div class="part-name">水管</div></div>
+        <div class="spec-cell"><ul class="specs"><li>内径 7 毫米</li><li>外径 10 毫米</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_adapter_064_087.jpg" alt="064 转 087 水管转接头"></div>
+        <div class="name-cell"><div class="part-name">水管转接头</div></div>
+        <div class="spec-cell"><ul class="specs"><li>064 端：适用于内径 4.8 至 6.4 毫米的水管</li><li>087 端：适用于内径 6.4 至 8.7 毫米的水管</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_adapter_048_087.jpg" alt="048 转 087 水管转接头"></div>
+        <div class="name-cell"><div class="part-name">水管转接头</div></div>
+        <div class="spec-cell"><ul class="specs"><li>048 端：适用于内径 4.0 至 4.8 毫米的水管</li><li>087 端：适用于内径 6.4 至 8.7 毫米的水管</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_adapter_048_064.jpg" alt="048 转 064 水管转接头"></div>
+        <div class="name-cell"><div class="part-name">水管转接头</div></div>
+        <div class="spec-cell"><ul class="specs"><li>048 端：适用于内径 4.0 至 4.8 毫米的水管</li><li>064 端：适用于内径 4.8 至 6.4 毫米的水管</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_splitter_064.jpg" alt="064 水管分流接头"></div>
+        <div class="name-cell"><div class="part-name">水管分流接头</div></div>
+        <div class="spec-cell"><ul class="specs"><li>适用于内径 4.8 至 6.4 毫米的水管（064）</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_holder_9_12.jpg" alt="适用于内径 9 毫米、外径 12 毫米水管的固定夹"></div>
+        <div class="name-cell"><div class="part-name">水管固定夹</div></div>
+        <div class="spec-cell"><ul class="specs"><li>适用于内径 9 毫米 / 外径 12 毫米的水管</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pipe_holder_4_7.jpg" alt="适用于内径 4 毫米、外径 7 毫米水管的固定夹"></div>
+        <div class="name-cell"><div class="part-name">水管固定夹</div></div>
+        <div class="spec-cell"><ul class="specs"><li>适用于内径 4 毫米 / 外径 7 毫米的水管</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/three_way_valve_9_12.jpg" alt="适用于内径 9 毫米、外径 12 毫米水管的三通阀"></div>
+        <div class="name-cell"><div class="part-name">三通阀</div></div>
+        <div class="spec-cell"><ul class="specs"><li>5 伏，0.93 安</li><li>适用于内径 9 毫米 / 外径 12 毫米的水管</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/three_way_valve_4_7.jpg" alt="适用于内径 4 毫米、外径 7 毫米水管的三通阀"></div>
+        <div class="name-cell"><div class="part-name">三通阀</div></div>
+        <div class="spec-cell"><ul class="specs"><li>5 伏，约 1 安</li><li>适用于内径 4 毫米 / 外径 7 毫米的水管</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/ball_valve_8_8.jpg" alt="适用于内径 6.4 至 8.7 毫米水管的球阀"></div>
+        <div class="name-cell"><div class="part-name">球阀</div></div>
+        <div class="spec-cell"><ul class="specs"><li>适用于内径 6.4 至 8.7 毫米的水管</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/pump.jpg" alt="12 伏水泵"></div>
+        <div class="name-cell"><div class="part-name">水泵</div></div>
+        <div class="spec-cell"><ul class="specs"><li>12 伏，4.8 瓦，0.4 安</li><li>适用于内径 7 毫米 / 外径 10 毫米的水管</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/parts/Capacitive-Soil-Moisture-Sensor-Module-V2_0.jpg" alt="2.0 版本土壤湿度传感器"></div>
+        <div class="name-cell"><div class="part-name">土壤湿度传感器</div></div>
+        <div class="spec-cell"><ul class="specs"><li>2.0 版本</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/water_level_sensor.jpg" alt="定制水位传感器"></div>
+        <div class="name-cell"><div class="part-name">水位传感器</div></div>
+        <div class="spec-cell"><ul class="specs"><li>定制型号</li><li>检测到水时输出高电平</li><li>未检测到水时输出低电平</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/xh254_3pins_m_to_m.jpg" alt="3 针公头转公头 XH2.54 连接线"></div>
+        <div class="name-cell"><div class="part-name">XH2.54 连接线</div></div>
+        <div class="spec-cell"><ul class="specs"><li>公头转公头</li><li>3 针</li><li>两端线序相同</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/xh254_3pins_m_to_f.jpg" alt="3 针公头转母头 XH2.54 连接线"></div>
+        <div class="name-cell"><div class="part-name">XH2.54 连接线</div></div>
+        <div class="spec-cell"><ul class="specs"><li>公头转母头</li><li>3 针</li><li>两端线序相同</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/xh254_4pins_m_to_f.jpg" alt="4 针公头转母头 XH2.54 连接线"></div>
+        <div class="name-cell"><div class="part-name">XH2.54 连接线</div></div>
+        <div class="spec-cell"><ul class="specs"><li>公头转母头</li><li>4 针</li><li>两端线序相同</li></ul></div>
+      </article>
+
+      <article class="part">
+        <div class="picture-cell"><img class="part-photo" src="assets/optimized/parts/ph20_2pins_m_to_f.jpg" alt="2 针公头转母头 PH2.0 连接线"></div>
+        <div class="name-cell"><div class="part-name">PH2.0 连接线</div></div>
+        <div class="spec-cell"><ul class="specs"><li>公头转母头</li><li>2 针</li><li>两端线序相同</li></ul></div>
+      </article>
+    </section>
+  </main>
+
+  <footer>
+    植物浇水系统 · 配件参考
+  </footer>
+</body>
+</html>

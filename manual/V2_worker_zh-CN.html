@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="V2 八盆植物浇水工作节点开发版用户手册。">
+  <title>V2 八盆工作节点用户手册</title>
+  <style>
+    :root{--ink:#17261d;--muted:#58645d;--green:#287a43;--green-soft:#eef7f0;--line:#d8e1da;--blue:#1769aa;--warn-bg:#fff7e6;--danger:#9b241b;--danger-bg:#fff0ee;--todo:#664d03;--todo-bg:#fff8d8}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:#f6f8f6;color:var(--ink);font:16px/1.68 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    main,header,footer{width:min(980px,calc(100% - 28px));margin:auto}header{padding:30px 0 18px}.eyebrow{color:var(--green);font-weight:750;letter-spacing:.08em;text-transform:uppercase;font-size:.82rem}
+    h1{font-size:clamp(2rem,5vw,3.2rem);line-height:1.15;margin:.25rem 0 .6rem}h2{margin-top:2.4rem;padding-bottom:.35rem;border-bottom:2px solid var(--line)}h3{margin-top:1.7rem}p,li{max-width:78ch}
+    a{color:var(--blue)}nav.top{display:flex;gap:10px 18px;flex-wrap:wrap;margin-top:16px}nav.top a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:#fff;text-decoration:none}
+    .meta{color:var(--muted)}.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:20px;margin:18px 0;box-shadow:0 2px 10px #16351f0b}
+    .toc ol{columns:2;column-gap:38px}.toc li{break-inside:avoid;margin:.28rem 0}.callout{border-left:5px solid;padding:13px 16px;margin:18px 0;border-radius:5px;background:#fff}
+    .warning{border-color:var(--danger);background:var(--danger-bg)}.caution{border-color:#d28b21;background:var(--warn-bg)}.note{border-color:var(--green);background:var(--green-soft)}
+    .todo{border:2px dashed #b58a16;background:var(--todo-bg);padding:13px 16px;border-radius:8px;margin:16px 0;color:var(--todo)}.todo strong{font-family:ui-monospace,monospace}
+    figure{margin:22px 0}figure img{display:block;width:100%;height:auto;max-height:680px;object-fit:contain;background:#fff;border:1px solid var(--line);border-radius:12px}figcaption{color:var(--muted);font-size:.92rem;margin-top:7px}.photo-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.photo-grid figure{margin:8px 0}
+    table{width:100%;border-collapse:collapse;margin:14px 0;background:#fff}th,td{border:1px solid var(--line);padding:10px 12px;text-align:left;vertical-align:top}th{background:var(--green-soft)}.table-wrap{overflow-x:auto}
+    .steps{counter-reset:step;list-style:none;padding:0}.steps>li{counter-increment:step;position:relative;padding:0 0 18px 48px;max-width:84ch}.steps>li:before{content:counter(step);position:absolute;left:0;top:0;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--green);color:#fff;font-weight:750}
+    code{background:#eef1ee;padding:.12em .35em;border-radius:4px}footer{color:var(--muted);padding:34px 0 60px}.back{font-size:.9rem}.page-break{break-before:page}
+    @media(max-width:680px){.toc ol{columns:1}.card{padding:15px}.photo-grid{grid-template-columns:1fr}th,td{padding:8px}}
+    @media print{body{background:#fff;font-size:11pt}header,main,footer{width:100%}nav.top{display:none}.card{box-shadow:none;break-inside:avoid}a{color:inherit;text-decoration:none}a[href]:after{content:""}.todo,.callout{break-inside:avoid}.table-wrap{overflow:visible}table{font-size:9pt;table-layout:fixed}th,td{overflow-wrap:anywhere}figure img{max-height:190mm}h2{break-after:avoid}}
+  </style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">开发版手册 · 已组装原型机</div>
+  <h1>V2 八盆工作节点用户手册</h1>
+  <p class="meta">最近一次按设备软件（网页中称为“固件”）复核：2026-08-17 · 本开发版手册记录当前已确认的行为和随附硬件。</p>
+</header>
+
+<main>
+  <aside class="callout warning" aria-label="重要安全警告">
+    <strong>电池、水和带压水路：</strong>工作节点、充电器、电池和接头必须保持干燥。更改传感器或阀门连接前，先断开充电器和电池电源。可充电锂电池如发生鼓包、发热、刺穿、进水或其他损坏，应立即停用并按当地规定处置。
+  </aside>
+
+  <section class="card toc" aria-labelledby="contents">
+    <h2 id="contents">目录</h2>
+    <ol>
+      <li><a href="#overview">工作节点概览</a></li><li><a href="#hardware">硬件与通道对应</a></li>
+      <li><a href="#installation">安装</a></li><li><a href="#pairing">上电与配对</a></li>
+      <li><a href="#operation">正常运行</a></li><li><a href="#led">工作节点 LED</a></li>
+      <li><a href="#battery">电池与充电</a></li><li><a href="#update">软件更新</a></li>
+      <li><a href="#maintenance">维护</a></li><li><a href="#troubleshooting">故障排查</a></li>
+    </ol>
+  </section>
+
+  <section id="overview">
+    <h2>1. 工作节点概览</h2>
+    <p>V2 八盆工作节点读取最多八个土壤湿度传感器，把土壤和电池读数报告给 V2 主控制器，并控制最多八个阀门。它没有自己的网页。名称、干燥阈值、阀门时长、手动测试、自动计划和软件更新均从主控制器操作。</p>
+    <p>工作节点通过蓝牙与一台主控制器交换指令和读数。手动模式下保持唤醒，便于快速测试；自动模式下由主控制器安排唤醒时间，并在两次检查之间让工作节点进入低功耗休眠。</p>
+    <figure><img src="assets/system-topology.svg" alt="手机通过 Wi-Fi 连接 V2 主控制器；主控制器通过蓝牙与管理传感器和阀门的八盆工作节点通信。"><figcaption>工作节点由电池供电，放在花盆附近。全部设置均在主控制器网页完成。</figcaption></figure>
+  </section>
+
+  <section id="hardware">
+    <h2>2. 硬件与通道对应</h2>
+    <figure><img src="assets/optimized/worker_device_v2.jpg" alt="装在随附外壳中的 V2 八盆工作节点，可见电池、控制板、接口以及黄色圆圈标出的电源按钮。"><figcaption>装在随附外壳中的工作节点。电源按钮位于黄色圆圈内；按一下开启，再按一下关闭。</figcaption></figure>
+    <p>工作节点包含可充电电池、内置 USB-C 充电部分、控制板、八个土壤传感器接口和八个阀门接口。请使用随附的常见 <strong>Soil Moisture Sensor V2.0（土壤湿度传感器 V2.0）</strong>固定设计，以及项目所有者验证并提供的阀门。节点通过一个共用电路依次读取传感器，并逐个开启阀门，以限制用电量和水流负载。</p>
+    <div class="photo-grid">
+      <figure><img src="assets/optimized/worker_device_connector_number.jpg" alt="工作节点接口排从左到右标为 1、2；3、4；5、6；7、8 四组。"><figcaption>实体通道编号从左到右依次为：1–2、3–4、5–6、7–8。</figcaption></figure>
+      <figure><img src="assets/optimized/worker_device_sensor_valve_connector.jpg" alt="工作节点接口排，显示 1 至 8 号通道中较大的土壤传感器接口和较小的对应阀门接口。"><figcaption>每个通道有一个土壤传感器接口和一个对应阀门接口。请按照实体编号配对。</figcaption></figure>
+    </div>
+    <figure><img src="assets/worker-channels.svg" alt="八盆通道对应图：传感器 S1、阀门 V1 和花盆 1 为一组，依次对应至传感器 S8、阀门 V8 和花盆 8。"><figcaption><strong>通道规则：</strong>传感器 N、阀门 N 和花盆 N 必须始终指向同一株植物。</figcaption></figure>
+    <aside class="callout caution"><strong>每次连接前核对编号。</strong>如上图所示，实体接口从左侧的 1–2 号排到右侧的 7–8 号。传感器 N、阀门 N、界面花盆 N 和实际植物必须全部使用同一编号。</aside>
+  </section>
+
+  <section id="installation">
+    <h2>3. 安装</h2>
+    <ol class="steps">
+      <li>把工作节点放在可能溅水位置的上方，保持干燥和通风，同时确保八组传感器和阀门线缆可以到达。天线区域应远离金属、电池和积水。</li>
+      <li>断开电池和充电器，为每株植物分配一个固定的 1–8 通道编号。</li>
+      <li>把各个 Soil Moisture Sensor V2.0 安装在一致深度，远离盆壁和直接出水口。插入深度不得超过下图白线；不要把传感器板、裸露电子部分或线缆接头埋入土中。</li>
+      <li>按已确认的极性和方向，把每个传感器接到对应编号的传感器接口。</li>
+      <li>在水路中安装随附的同编号阀门。A 口接进水，B 口接通往该植物的水管，C 口接下一个阀门或回到水箱的水管；阀门线接到同编号阀门接口。</li>
+      <li>按照下图为每个延长线接头、传感器板的接口区域以及阀门电气部分做好绝缘。固定水管和线缆，使漏水不会沿线流向任何接头、电路板、电池或充电器。</li>
+      <li>连接认可的电池，然后按<a href="#pairing">第 4 节</a>操作。启用自动浇水前，从主控制器逐一测试每个通道。</li>
+    </ol>
+    <figure><img src="assets/optimized/moisture_sensor.jpg" alt="Soil Moisture Sensor V2.0 实物图，白线标出最大插入深度。"><figcaption><strong>最大深度：不得超过传感器上的白线。</strong>传感器板和接头必须露在土壤外。</figcaption></figure>
+    <figure><img src="assets/optimized/valve.jpg" alt="三通浇水阀门标注图：A 为进水口，B 接通往植物的水管，C 接下一个阀门或回水箱。"><figcaption>阀门水流：A 是进水口；B 通往植物；C 通往下一个阀门或回到水箱。阀门未启动时，水从 A 流向 C；阀门启动后，水从 A 流向 B。</figcaption></figure>
+    <div class="photo-grid">
+      <figure><img src="assets/optimized/moisture_sensor_insulate_tape.jpg" alt="土壤传感器接口和电路板裸露状态，与使用绝缘胶带完整包裹后的对比。"><figcaption>包裹传感器板的接口区域；白线以下的感应片保持裸露。</figcaption></figure>
+      <figure><img src="assets/optimized/wire_connector_insulate_tape.jpg" alt="延长线插头裸露状态，与接好后使用绝缘胶带完整包裹的对比。"><figcaption>先把延长线插头完全插好，再用绝缘胶带包住整个接头。</figcaption></figure>
+      <figure><img src="assets/optimized/valve_insulate_tape.jpg" alt="阀门电线和电气部分裸露状态，与使用绝缘胶带保护后的对比。"><figcaption>包裹阀门电线接头和电气区域，所有水路接口保持畅通。</figcaption></figure>
+    </div>
+    <aside class="callout warning"><strong>绝缘胶带只能作为额外保护，不能防水。</strong>传感器板、线缆接头、阀门和工作节点必须保持干燥，远离溅水和结露。胶带松动、破损或进水后，应在使用前更换。</aside>
+    <aside class="callout caution"><strong>仅限室内使用：</strong>随附外壳没有密封。必须避免溅水和结露，并只在人体感觉舒适的室内温度和湿度条件下使用。</aside>
+  </section>
+
+  <section id="pairing">
+    <h2>4. 上电与配对</h2>
+    <h3>首次关联</h3>
+    <ol class="steps">
+      <li>如有需要，先给随附电池充电，然后按一下电源按钮开启工作节点。</li>
+      <li>观察启动过程。红色电源灯保持常亮，正常节点开始读取传感器，蓝色状态灯在读取周期中闪烁两次。重复三闪的蓝灯故障见<a href="#led">第 6 节</a>。</li>
+      <li>从外壳外侧标签读取工作节点的 12 位蓝牙设备编号；主控制器网页中称为 MAC 地址。它只使用数字 0–9 和字母 A–F。</li>
+      <li>在主控制器上保持自动模式关闭。在<strong>添加工作节点</strong>中输入设备编号，可选填名称。</li>
+      <li>至少等待一个联系周期，通常约 30 秒。工作节点收到主控制器的首个有效指令时，会与该主控制器建立关联。</li>
+      <li>确认界面显示八个花盆、电池百分比、距上次联系的时间、信号强度和土壤读数。有人看守地测试全部通道。</li>
+    </ol>
+    <h3>转移到另一台主控制器</h3>
+    <p>先从旧主控制器删除此节点。如果节点在唤醒状态下约五分钟没有收到旧主控制器的消息，就会忘记旧连接并重新进入可配对状态。完全断开并重新连接电池也会清除记住的连接。完成其中一种操作后，再把节点添加到新主控制器。</p>
+  </section>
+
+  <section id="operation">
+    <h2>5. 正常运行</h2>
+    <div class="table-wrap"><table><thead><tr><th>状态</th><th>工作节点行为</th></tr></thead><tbody>
+      <tr><td>尚未关联</td><td>读取传感器与电池，并在设置期间约每 10 秒让主控制器发现一次。它不会接受发给其他设备的浇水指令。</td></tr>
+      <tr><td>主控制器处于手动模式</td><td>保持唤醒，一次传感器读取结束后等待约五秒再开始下一次，并随时等待主控制器联系、阀门测试或更新准备。加上测量所需时间，完整周期约每七秒重复。响应快但耗电较高。</td></tr>
+      <tr><td>主控制器处于自动模式</td><td>按计划时间唤醒，向主控制器提供新读数，依次开启选中的阀门，完成后通知主控制器，再按指令进入定时低功耗休眠。</td></tr>
+      <tr><td>唤醒状态下约五分钟未收到主控制器消息</td><td>忘记原主控制器，重新进入可配对状态。</td></tr>
+    </tbody></table></div>
+    <h3>传感器与阀门行为</h3>
+    <ul>
+      <li>每次读取先检查电池，再读取所有土壤通道。节点唤醒期间，完成这些工作后等待约五秒再开始下一次；加上测量时间，正常灯效约每七秒重复。</li>
+      <li>土壤读数越高表示越干。</li>
+      <li>一条浇水命令可以选择多个花盆，但工作节点按每盆设定时长逐个开启阀门。</li>
+      <li>阀门工作期间以及关闭后的短时间内，电池采样会被推迟，因此浇水期间显示的电池值可能不会立即变化。</li>
+      <li>工作节点只有在通知主控制器任务已完成后才会进入休眠。</li>
+    </ul>
+    <div class="callout note"><strong>数据可能延迟的原因：</strong>休眠中的节点不会持续在线；下次更新取决于主控制器的<strong>数据同步间隔</strong>。设置或排查问题时关闭自动模式，使已关联工作节点保持唤醒。</div>
+  </section>
+
+  <section id="led">
+    <h2>6. 工作节点 LED</h2>
+    <p>工作节点有一个<strong>红色电源灯</strong>，在节点通电开启时保持常亮。受控制的<strong>蓝色状态灯</strong>与选择土壤传感器的电路共用一条电气连接，因此读取传感器时也会闪烁，不能把它当作普通状态灯。以下灯效全部指蓝灯。</p>
+    <div class="table-wrap"><table><thead><tr><th>灯效</th><th>含义</th><th>操作</th></tr></thead><tbody>
+      <tr><td>中等长度闪两次，每次约 0.4 秒，两次之间约 0.4 秒；唤醒时大约每 7 秒重复</td><td>正常读取传感器。这是估算时间，工作节点忙碌时可能略有变化。</td><td>无需操作。</td></tr>
+      <tr><td>每 2 秒快速闪三次，持续 1 分钟</td><td>低功耗计时所用的一个小型时钟部件未能正常启动。</td><td>等待自动重试。如果此模式再次出现，断电并请人检修工作节点。</td></tr>
+      <tr><td>一分钟故障灯效后，灯熄灭约 5 秒</td><td>工作节点短暂休眠，之后再次尝试启动时钟部件。</td><td>不要把这段熄灭时间误认为启动成功；等待下一次结果。</td></tr>
+    </tbody></table></div>
+    <p>时钟检查成功时没有单独的成功灯效；之后会开始正常的两闪传感器读取灯效。</p>
+    <figure><img src="assets/worker-led-patterns.svg" alt="工作节点蓝色状态灯灯效图，显示估算的正常传感器两闪周期和重复三闪的启动故障。"><figcaption>蓝色区域表示蓝色状态灯亮。正常一行按传感器读取顺序估算：中等长度闪两次，间隔约 0.4 秒，唤醒时大约每 7 秒重复。故障一行每 2 秒重复一次，持续 1 分钟，之后熄灭约 5 秒再重试。</figcaption></figure>
+  </section>
+
+  <section id="battery">
+    <h2>7. 电池与充电</h2>
+    <h3>电池与电源按钮</h3>
+    <ul>
+      <li>工作节点使用标称 3.7 V 的可充电锂聚合物电池。</li>
+      <li>随附电池容量为 2200 mAh，使用 2 针 XH2.54 接头。任何认可的替换电池都必须是至少 1500 mAh 的 3.7 V 锂聚合物电池，并且接头与线序极性和随附电池完全相同。</li>
+      <li>电池用胶带固定在电路板上。不要拉扯、刺穿、弯折电池，也不要把它从电路板上撬下。</li>
+      <li>按一下电源按钮可开启工作节点；再按一下可关闭。</li>
+    </ul>
+    <aside class="callout warning"><strong>电池接头极性：</strong>接头和线序必须与随附电池完全一致。不要仅凭接头外形猜测、反接或重新接线；有任何疑问时，请向项目所有者取得认可的替换电池。</aside>
+    <p>网页显示的电池百分比只是估计值，不能准确代表还可使用多长时间。应观察多次更新的变化趋势，并在长时间无人看守运行前充电。电量突然大幅下降时，也应检查电池及其接头。</p>
+    <p>显示电量约为 3% 或更低时，工作节点会关机以保护电池。充电后，按一下电源按钮即可重新开启。</p>
+    <aside class="callout warning"><strong>可充电锂电池安全：</strong>只能使用认可的电池与充电方法。在远离水和无人值守植物的不燃表面充电。如电池鼓包、漏液、发热、产生异味或绝缘层损坏，立即停止使用。</aside>
+    <h3>USB-C 充电</h3>
+    <ul>
+      <li>使用额定 5 V、至少 1.5 A 的充电器，连接外壳背面露出的 USB Type-C 接口。充电模块已经内置在工作节点中。</li>
+      <li>工作节点充电时可以保持开启并继续运行。</li>
+      <li>充电部分有四个红色电量指示灯，充电过程中会亮起；四个全部亮起表示充电完成。</li>
+    </ul>
+    <aside class="callout note"><strong>不要混淆这些灯：</strong>四个红色充电灯属于充电部分；另一个红色电源灯表示工作节点已开启，蓝灯表示工作节点状态。</aside>
+  </section>
+
+  <section id="update" class="page-break">
+    <h2>8. 工作节点软件更新</h2>
+    <p>主控制器网页中此功能称为<strong>固件更新</strong>。“固件”就是保存在设备内部的软件。工作节点更新由 V2 主控制器发起；工作节点自身没有上传页面。</p>
+    <ol class="steps">
+      <li>给工作节点充足电并把它放在主控制器附近，确保两台设备供电稳定。</li>
+      <li>在主控制器关闭自动模式，等待系统不再浇水或检查工作节点。</li>
+      <li>打开<strong>固件更新</strong>，在<strong>工作节点固件</strong>区域上传正确的工作节点更新文件（文件名以 <code>.ota</code> 结尾）。</li>
+      <li>在该页面的工作节点列表中，为此节点选择<strong>更新</strong>。</li>
+      <li>等待检查、连接、传输、验证、重启和重新连接。不要断开电池。</li>
+      <li>确认主控制器上报新的工作节点软件版本。</li>
+    </ol>
+    <p>文件必须适用于正确的工作节点型号、没有损坏，并且软件版本必须符合要求。不能重复安装当前版本，低于最低允许版本的文件会被拒绝。</p>
+  </section>
+
+  <section id="maintenance">
+    <h2>9. 维护</h2>
+    <ul>
+      <li>定期检查电池是否鼓包、受热、磨损或进水。</li><li>检查全部线缆和接头是否腐蚀、松动、绝缘层受压或缺少拉力保护。</li>
+      <li>检查水管与阀体是否漏水、结垢、堵塞或端口连接错误。</li>
+      <li>轻柔清洁土壤传感器表面；移动传感器、更换土壤、换盆或更换电池/传感器后重新校准。</li>
+      <li>定期比较各通道出水量；水管长度和沉积物会改变流量。</li>
+      <li>存放前断开水路、关闭工作节点，并按照电池供应商的锂聚合物电池存放电量和温度要求操作。</li>
+    </ul>
+  </section>
+
+  <section id="troubleshooting">
+    <h2>10. 故障排查</h2>
+    <div class="table-wrap"><table><thead><tr><th>现象</th><th>检查项目</th></tr></thead><tbody>
+      <tr><td>主控制器中不显示节点</td><td>检查电池/电源、12 位蓝牙设备编号是否完全正确、距离，并确认自动模式已关闭。至少等待一个约 30 秒的联系周期。</td></tr>
+      <tr><td>节点曾与其他主控制器配合使用</td><td>先从旧主机删除，然后让节点在唤醒状态下约五分钟收不到旧主机通信，或彻底断开电池再上电，之后再添加到新主机。</td></tr>
+      <tr><td>很长时间才更新一次</td><td>节点可能处于低功耗休眠，其唤醒时间由主控制器的<strong>数据同步间隔</strong>决定。关闭自动模式后排查问题。</td></tr>
+      <tr><td>传感器显示未连接或数值异常</td><td>断电，重新插紧对应传感器，检查方向和线缆损坏，确认裸露电子部分未埋入土中，再与已知正常传感器对比。</td></tr>
+      <tr><td>浇错花盆</td><td>停止水泵。对照实体接口编号照片，确认传感器 N、阀门 N、界面花盆 N 和实际植物 N 全部一致。</td></tr>
+      <tr><td>阀门不动作</td><td>检查节点同步、电池电量、接头和极性、是否为正确的 5 V 阀门、水管方向以及设定时长。只能在自动模式关闭且有人看守时测试。</td></tr>
+      <tr><td>电量很低或节点关机</td><td>停止阀门测试、检查电池，并通过 USB-C 充电。按一下电源按钮即可重新开启。</td></tr>
+      <tr><td>重复出现三闪故障</td><td>低功耗计时所用的时钟部件未能正常启动。断电并请人检修；正常读取传感器是两次中等长度闪烁，不是重复三闪。</td></tr>
+      <tr><td>软件更新失败</td><td>给节点充电、移近主控制器、关闭自动模式、等待主控制器空闲，并确认文件适用于正确的工作节点型号和软件版本。</td></tr>
+    </tbody></table></div>
+  </section>
+
+</main>
+
+<footer><p>V2 八盆工作节点开发版用户手册 · 行为依据 2026-08-17 复核的设备软件。</p></footer>
+</body>
+</html>

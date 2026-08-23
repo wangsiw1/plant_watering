@@ -9,3 +9,6 @@ dependencies.lock
 tmp/
 .agents/
 .codex/
+main/test/
+worker/test/
+__pycache__

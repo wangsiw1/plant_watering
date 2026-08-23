@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 430" role="img" aria-labelledby="title desc">
+  <title id="title">Main controller light patterns shown on the same three-second scale</title>
+  <desc id="desc">Seven rows compare software update, tank warning, Wi-Fi connection, watering, worker check, and normal light patterns over three seconds.</desc>
+  <defs>
+    <linearGradient id="breath" x1="0" x2="1">
+      <stop offset="0" stop-color="#b9dcf5"/><stop offset=".333" stop-color="#2584d8"/>
+      <stop offset=".667" stop-color="#b9dcf5"/><stop offset="1" stop-color="#2584d8"/>
+    </linearGradient>
+    <style>
+      .track{fill:#edf1ee;stroke:#cbd5e1}.on{fill:#2584d8}.label{font:600 16px system-ui,sans-serif;fill:#1f2937}
+      .tick{font:13px system-ui,sans-serif;fill:#64748b;text-anchor:middle}.grid{stroke:#cbd5e1;stroke-dasharray:3 5}
+    </style>
+  </defs>
+  <text class="label" x="20" y="48">Update / 更新</text><rect class="track" x="220" y="25" width="720" height="30" rx="5"/>
+  <g class="on">
+    <path d="M220 25h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24z"/>
+  </g>
+  <text class="label" x="20" y="103">Tank / 水箱警告</text><rect class="track" x="220" y="80" width="720" height="30" rx="5"/><path class="on" d="M220 80h120v30H220zm240 0h120v30H460zm240 0h120v30H700z"/>
+  <text class="label" x="20" y="158">Wi-Fi searching / 搜索</text><rect class="track" x="220" y="135" width="720" height="30" rx="5"/><rect x="220" y="135" width="720" height="30" rx="5" fill="url(#breath)"/>
+  <text class="label" x="20" y="213">Wi-Fi connected / 已连接</text><rect class="track" x="220" y="190" width="720" height="30" rx="5"/><rect class="on" x="220" y="190" width="60" height="30"/>
+  <text class="label" x="20" y="268">Watering / 浇水</text><rect class="track" x="220" y="245" width="720" height="30" rx="5"/><path class="on" d="M220 245h24v30h-24zm48 0h24v30h-24zm48 0h24v30h-24z"/>
+  <text class="label" x="20" y="323">Worker check / 检查节点</text><rect class="track" x="220" y="300" width="720" height="30" rx="5"/><rect class="on" x="220" y="300" width="72" height="30"/>
+  <text class="label" x="20" y="378">Normal / 正常空闲</text><rect class="track" x="220" y="355" width="720" height="30" rx="5"/>
+  <g><path class="grid" d="M220 20v370M460 20v370M700 20v370M940 20v370"/><text class="tick" x="220" y="415">0 s</text><text class="tick" x="460" y="415">1 s</text><text class="tick" x="700" y="415">2 s</text><text class="tick" x="940" y="415">3 s</text></g>
+</svg>

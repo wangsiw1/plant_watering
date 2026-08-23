@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Development user manual for the V2 plant-watering main controller.">
+  <title>V2 Main Controller User Manual</title>
+  <style>
+    :root{--ink:#17261d;--muted:#58645d;--green:#287a43;--green-soft:#eef7f0;--line:#d8e1da;--blue:#1769aa;--warn:#8a4b08;--warn-bg:#fff7e6;--danger:#9b241b;--danger-bg:#fff0ee;--todo:#664d03;--todo-bg:#fff8d8}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:#f6f8f6;color:var(--ink);font:16px/1.58 system-ui,-apple-system,"Segoe UI",sans-serif}
+    main,header,footer{width:min(980px,calc(100% - 28px));margin:auto}header{padding:30px 0 18px}.eyebrow{color:var(--green);font-weight:750;letter-spacing:.08em;text-transform:uppercase;font-size:.82rem}
+    h1{font-size:clamp(2rem,5vw,3.2rem);line-height:1.08;margin:.25rem 0 .6rem}h2{margin-top:2.4rem;padding-bottom:.35rem;border-bottom:2px solid var(--line)}h3{margin-top:1.7rem}p,li{max-width:78ch}
+    a{color:var(--blue)}nav.top{display:flex;gap:10px 18px;flex-wrap:wrap;margin-top:16px}nav.top a,.pill{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:#fff;text-decoration:none}
+    .meta{color:var(--muted)}.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:20px;margin:18px 0;box-shadow:0 2px 10px #16351f0b}
+    .toc ol{columns:2;column-gap:38px}.toc li{break-inside:avoid;margin:.28rem 0}.callout{border-left:5px solid;padding:13px 16px;margin:18px 0;border-radius:5px;background:#fff}
+    .warning{border-color:var(--danger);background:var(--danger-bg)}.caution{border-color:#d28b21;background:var(--warn-bg)}.note{border-color:var(--green);background:var(--green-soft)}
+    .todo{border:2px dashed #b58a16;background:var(--todo-bg);padding:13px 16px;border-radius:8px;margin:16px 0;color:var(--todo)}.todo strong{font-family:ui-monospace,monospace}
+    figure{margin:22px 0}figure img{display:block;width:100%;height:auto;max-height:680px;object-fit:contain;background:#fff;border:1px solid var(--line);border-radius:12px}figcaption{color:var(--muted);font-size:.92rem;margin-top:7px}.photo-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.photo-grid figure{margin:8px 0}
+    table{width:100%;border-collapse:collapse;margin:14px 0;background:#fff}th,td{border:1px solid var(--line);padding:10px 12px;text-align:left;vertical-align:top}th{background:var(--green-soft)}.table-wrap{overflow-x:auto}
+    .steps{counter-reset:step;list-style:none;padding:0}.steps>li{counter-increment:step;position:relative;padding:0 0 18px 48px;max-width:84ch}.steps>li:before{content:counter(step);position:absolute;left:0;top:0;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--green);color:#fff;font-weight:750}
+    .checklist li{margin:.45rem 0}.back{font-size:.9rem}.priority{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.priority span{padding:4px 8px;border-radius:6px;background:var(--green-soft);border:1px solid var(--line)}code{background:#eef1ee;padding:.12em .35em;border-radius:4px}
+    footer{color:var(--muted);padding:34px 0 60px}.page-break{break-before:page}
+    @media(max-width:680px){.toc ol{columns:1}.card{padding:15px}.photo-grid{grid-template-columns:1fr}th,td{padding:8px}.priority{display:block}.priority span{display:block;margin:5px 0}.priority b{display:none}}
+    @media print{body{background:#fff;font-size:11pt}header,main,footer{width:100%}nav.top{display:none}.card{box-shadow:none;break-inside:avoid}a{color:inherit;text-decoration:none}a[href]:after{content:""}.todo,.callout{break-inside:avoid}.table-wrap{overflow:visible}table{font-size:9pt;table-layout:fixed}th,td{overflow-wrap:anywhere}figure img{max-height:190mm}h2{break-after:avoid}}
+  </style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">Development manual · assembled prototype</div>
+  <h1>V2 Main Controller User Manual</h1>
+  <p class="meta">Last reviewed against device software (“firmware”): 2026-08-17 · This development manual documents confirmed current behavior and supplied hardware.</p>
+</header>
+
+<main>
+  <aside class="callout warning" aria-label="Critical safety warning">
+    <strong>Water and electricity:</strong> keep the controller, power adapter, wiring, and connectors dry. Disconnect the 12 V supply before changing any connection. Do not run the pump dry, and do not leave automatic watering unattended until every channel has passed a supervised leak test.
+  </aside>
+
+  <section class="card toc" aria-labelledby="contents">
+    <h2 id="contents">Contents</h2>
+    <ol>
+      <li><a href="#overview">System overview</a></li>
+      <li><a href="#hardware">Hardware and connections</a></li>
+      <li><a href="#first-start">First start and Wi-Fi</a></li>
+      <li><a href="#interface">Web interface</a></li>
+      <li><a href="#workers">Add and configure workers</a></li>
+      <li><a href="#manual-mode">Manual operation</a></li>
+      <li><a href="#auto-mode">Automatic operation</a></li>
+      <li><a href="#calibration">Calibration</a></li>
+      <li><a href="#led">Status LED</a></li>
+      <li><a href="#updates">Software updates</a></li>
+      <li><a href="#reset">Reset and Wi-Fi clearing</a></li>
+      <li><a href="#troubleshooting">Troubleshooting</a></li>
+    </ol>
+  </section>
+
+  <section id="overview">
+    <h2>1. System overview</h2>
+    <p>The V2 main controller is the central part of the system and must stay powered. It provides the control webpage, checks the water tank, controls the 12 V pump, and exchanges readings and instructions with configured eight-pot workers. Your phone or computer reaches the webpage through Wi-Fi; workers communicate with the main controller through Bluetooth.</p>
+    <p>The current device software accepts up to eight workers. Each worker is handled separately, so one worker that does not respond will not stop other workers with new readings from being checked.</p>
+    <figure>
+      <img src="assets/system-topology.svg" alt="Phone connected by Wi-Fi to the V2 main controller, which controls a tank and pump and communicates by Bluetooth with eight-pot workers.">
+      <figcaption>What each part does and how the parts connect. The main controller and pump require continuous power; workers manage sensors and valves near the pots.</figcaption>
+    </figure>
+    <div class="callout note"><strong>Internet is optional:</strong> manual time setting and normal watering work without Internet access. The <strong>Sync time (NTP)</strong> button sets the clock from an Internet time service and therefore needs Internet access.</div>
+    <div class="callout caution"><strong>Use only on a trusted home network:</strong> the current webpage has no user sign-in. Do not make it reachable from the Internet and do not connect it to public Wi-Fi.</div>
+  </section>
+
+  <section id="hardware">
+    <h2>2. Hardware and connections</h2>
+    <figure>
+      <img src="assets/optimized/main_device_v2.jpg" alt="V2 main controller inside its supplied case, showing the power, pump, and tank-sensor connection areas.">
+      <figcaption>V2 main controller in its supplied case. Use the device labels and the connection instructions below.</figcaption>
+    </figure>
+    <figure>
+      <img src="assets/main-connections.svg" alt="Conceptual diagram connecting a 12-volt adapter, tank sensor, and 12-volt pump to the main controller, with tubing from the tank through the pump to the valves.">
+      <figcaption>Conceptual installation. Follow the labeled device connections and do not force a plug.</figcaption>
+    </figure>
+
+    <h3>Required items</h3>
+    <ul>
+      <li>Assembled V2 main controller with its device software already installed.</li>
+      <li>Regulated 12 V, 1 A DC adapter with a 5.5 mm × 2.1 mm barrel plug, center positive and outer negative.</li>
+      <li>12 V, 5 W water pump. The supplied pump is advertised for up to 240 L/hour and 3 metres of lift.</li>
+      <li>The supplied external tank-level sensor.</li>
+      <li>Reservoir, suitable water tubing, fittings, and configured V2 eight-pot worker units.</li>
+      <li>A phone or computer connected to the same 2.4 GHz Wi-Fi network.</li>
+    </ul>
+
+    <aside class="callout warning"><strong>Pump protection:</strong> never run the pump without water and never operate it against blocked or pinched tubing. The stated 240 L/hour and 3-metre lift are manufacturer claims; actual flow depends on tubing, lift height, valves, and restrictions.</aside>
+    <figure>
+      <img src="assets/optimized/pump.jpg" alt="Supplied water pump annotated with port A as the water inlet and port B as the water outlet.">
+      <figcaption>Pump ports: connect the tank water supply to inlet A. Connect outlet B to the tubing that supplies the worker valves.</figcaption>
+    </figure>
+
+    <h3 id="tank-sensor">Test and calibrate the tank-level sensor</h3>
+    <p>This test works only while the sensor is connected and the main controller is powered. The red light on the sensor board is on when water is detected at the sensor's height and off when the water is below it. This light is separate from the main controller's red power light.</p>
+    <div class="photo-grid">
+      <figure><img src="assets/optimized/water_level_sensor_high_level.jpg" alt="Water-level sensor on the outside of a tank with its red light on because water is present at the sensor height."><figcaption>Water detected: the sensor's red light is on.</figcaption></figure>
+      <figure><img src="assets/optimized/water_level_sensor_low_level.jpg" alt="Water-level sensor on the outside of a tank with its red light off because water is below the sensor height."><figcaption>Water low: the sensor's red light is off.</figcaption></figure>
+    </div>
+    <ol class="steps">
+      <li>Before applying tape, move the powered sensor around the outside of the tank. Test it against an area backed by water and an area above the water line. Confirm that its red light turns on and off correctly.</li>
+      <li>Keep hands and fingers away from the sensor while checking it. The sensor can react to the human body and give a false water reading when touched.</li>
+      <li>If calibration is needed, fill the tank to the lowest water level you intend to use and hold the sensor at that water line without touching its sensing face.</li>
+      <li>Press and hold the calibration button for 2 seconds, until the red light starts flashing. Once flashing begins, release the button and do not touch the sensor until the flashing stops.</li>
+      <li>Calibration is complete when the flashing stops. Retest the High and Low indications before enabling automatic watering.</li>
+    </ol>
+
+    <h3>Installation order</h3>
+    <ol class="steps">
+      <li>Place the main controller and adapter above possible spill level in a dry, ventilated location. Keep the Wi-Fi/Bluetooth antenna area away from metal and standing water.</li>
+      <li>With power disconnected, connect the tank-level sensor using its confirmed orientation.</li>
+      <li>Install the pump inlet in the reservoir and route its outlet to the worker-valve supply line. Secure all tubing.</li>
+      <li>Connect the pump to the pump output, observing the confirmed polarity.</li>
+      <li>Fill the reservoir, inspect every fitting, and only then connect the 12 V adapter. The sensor's red light can work only after this step.</li>
+      <li>With the controller powered, follow the <a href="#tank-sensor">sensor test</a>. Move the sensor around the tank without touching its sensing face and confirm that it correctly shows water present and water low.</li>
+      <li>Choose a final position on the <strong>outside</strong> of a tank wall thinner than 10 mm. The sensor must sit above the pump so that a Low reading stops watering before the pump can run dry. Clean and dry the wall, tape the sensor firmly in place, then retest it.</li>
+      <li>Keep <strong>Auto Mode off</strong>. Perform the supervised manual test in <a href="#manual-mode">Section 6</a>, stop immediately on leakage, unexpected flow, overheating, or abnormal noise.</li>
+    </ol>
+    <figure><img src="assets/optimized/water_level_sensor_below_pump.jpg" alt="Example tank installation showing the water-level sensor positioned above the pump's minimum safe water level."><figcaption>Place the sensor above the pump's minimum safe water level. This lets the controller stop watering before the pump is exposed.</figcaption></figure>
+    <aside class="callout caution"><strong>Indoor case only:</strong> the supplied case is not sealed. Always protect it from splashes and condensation, and use it only in indoor temperature and humidity conditions comfortable for people.</aside>
+  </section>
+
+  <section id="first-start">
+    <h2>3. First start and Wi-Fi setup</h2>
+    <ol class="steps">
+      <li>Power the main controller. While Wi-Fi is not connected, its blue status light slowly fades brighter and dimmer every two seconds.</li>
+      <li>On a phone or computer, join the temporary Wi-Fi network named <code>plant-watering-XXXXXX</code>. The final six characters identify this controller.</li>
+      <li>Use the setup page to choose the home 2.4 GHz Wi-Fi network and enter its password. Remain nearby until the blue status light gives a single connection flash.</li>
+      <li>Reconnect the phone or computer to the home network if necessary.</li>
+      <li>Open <code>http://plant-watering-XXXXXX.local</code> in a browser. Use the same six characters shown by the temporary setup network.</li>
+      <li>Leave Auto Mode off while completing worker setup and calibration.</li>
+    </ol>
+    <div class="callout caution"><strong>If Wi-Fi setup returns after every restart:</strong> confirm that the selected Wi-Fi is available and that its password is correct. The main controller waits for setup when it cannot complete a normal connection.</div>
+    <aside class="callout note"><strong>If the <code>.local</code> address does not open:</strong> if it worked previously and later stopped, restart the main controller and try again after Wi-Fi reconnects. If it has never worked, confirm that the phone is on the same Wi-Fi, turn off any VPN, and check whether the router blocks multicast—the local-device traffic used for this address. Contact support if the router setting cannot be checked or changed.</aside>
+  </section>
+
+  <section id="interface">
+    <h2>4. Web interface</h2>
+    <h3>Status section</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>Current time</td><td>Local 24-hour time, timezone offset, and clock source. Scheduling uses this time.</td></tr>
+        <tr><td>Water tank level</td><td><strong>High</strong> permits pump operation and automatic watering. Low or Not Connected is treated as unsafe and blocks or stops both automatic watering and the manual pump.</td></tr>
+        <tr><td>System status</td><td>Ready, Syncing, Watering, Sleeping, or Updating.</td></tr>
+        <tr><td>Auto mode</td><td>Whether scheduled automatic evaluation is enabled.</td></tr>
+        <tr><td>Last/next sync</td><td>Age of the last automatic data cycle and time until the next one. These are shown only while Auto Mode is enabled.</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>Settings and current limits</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Setting</th><th>Default</th><th>Allowed value and behavior</th></tr></thead>
+      <tbody>
+        <tr><td>Main name</td><td>Controller's six-character ID</td><td>A name using English letters or numbers can be up to 64 characters. Chinese characters and emoji use more space, so fewer will fit. The same limit applies to worker and pot names.</td></tr>
+        <tr><td>Language</td><td>English</td><td>English or Simplified Chinese.</td></tr>
+        <tr><td>Timezone</td><td>UTC+00:00</td><td>UTC−14:00 through UTC+14:00 in 15-minute UI steps.</td></tr>
+        <tr><td>Auto-mode window</td><td>00:00–23:59</td><td>Daily start and pause time. A start later than the pause time creates an overnight window.</td></tr>
+        <tr><td>Data sync interval</td><td>3600 s</td><td>60–2,419,200 s. Controls automatic sensor cycles and worker sleep time.</td></tr>
+        <tr><td>Pump pre-run</td><td>1 s</td><td>0–30 s. Automatic-mode pump priming before valve operation.</td></tr>
+        <tr><td>Manual pump timeout</td><td>10 s</td><td>1–60 s. Safety timer for the independent Start Pump control.</td></tr>
+        <tr><td>Auto Mode</td><td>Off</td><td>Disables manual controls while enabled.</td></tr>
+        <tr><td>Pot threshold</td><td>2000</td><td>0–4095. Higher readings mean drier soil; automatic watering requires the reading to exceed this value.</td></tr>
+        <tr><td>Pot duration</td><td>5 s</td><td>1–60 s per pot.</td></tr>
+        <tr><td>Pot automatic watering interval</td><td>3600 s</td><td>60–2,419,200 s per pot. This waiting period starts when automatic watering for that pot finishes successfully.</td></tr>
+      </tbody>
+    </table></div>
+    <h3>How often the page refreshes</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Page information</th><th>Normal refresh rate</th></tr></thead>
+      <tbody>
+        <tr><td>Main status: time, tank, system state, Auto Mode, schedules, and manual pump</td><td>Every 3 seconds.</td></tr>
+        <tr><td>Worker information: battery, last contact, signal strength, soil readings, and last watering</td><td>Every 5 seconds.</td></tr>
+        <tr><td>Extra diagnostic information on the Debug page</td><td>Every 10 seconds.</td></tr>
+        <tr><td><strong>Firmware Update</strong> page: software versions and update progress</td><td>Every 2 seconds.</td></tr>
+        <tr><td>After saving, removing, or resetting an item</td><td>An extra refresh is requested after about 0.3 seconds.</td></tr>
+      </tbody>
+    </table></div>
+    <p>Names and settings are not replaced while you are typing. Save with the appropriate <strong>Apply</strong> button before leaving the page.</p>
+    <p>Use <strong>Apply Settings</strong> for controller settings. Worker and pot edits are saved with their local <strong>Apply</strong> button or <strong>Apply All</strong>. Do not navigate away while unsaved edits are present.</p>
+
+    <h3>Clock setup</h3>
+    <p>Select the timezone before relying on the daily window. Press <strong>Sync time (NTP)</strong> to set the clock from the Internet, or enter the current <code>HH:MM</code> manually when working offline. If Internet time sync fails, the controller keeps its current clock.</p>
+  </section>
+
+  <section id="workers">
+    <h2>5. Add and configure workers</h2>
+    <ol class="steps">
+      <li>Power the worker and find its 12-character Bluetooth device ID, called a MAC address on the page. It uses only numbers 0–9 and letters A–F, with no spaces or punctuation.</li>
+      <li>In <strong>Workers</strong>, enter the device ID, optionally assign a name, and press <strong>Add Worker</strong>.</li>
+      <li>Wait for the main controller to contact it. In manual mode, this normally happens about every 30 seconds.</li>
+      <li>After the first response, the worker's eight pots appear. Confirm battery, time since last contact, signal strength, and soil readings.</li>
+      <li>Name the worker and pots. Configure and apply each threshold, duration, and automatic watering interval.</li>
+    </ol>
+    <p>A manual valve button remains disabled until that worker has sent its first readings and its sensor is usable. Removing a worker removes its saved names and pot settings from this main controller. Follow the worker's pairing instructions before moving it to another controller.</p>
+  </section>
+
+  <section id="manual-mode">
+    <h2>6. Manual operation</h2>
+    <p>Manual mode is the default setup and testing mode. Configured workers remain awake and the main controller contacts them about every 30 seconds, so they use more battery than in Auto Mode.</p>
+    <aside class="callout warning">
+      <strong>Manual controls are independent.</strong> <strong>Start Pump</strong> controls only the pump. <strong>Activate Valve</strong> controls only the selected worker valve for that pot's duration. The pump can start only when the tank reading is High and stops if that reading becomes unsafe. Confirm adequate water and never run the pump dry.
+    </aside>
+    <h3>Supervised pump-and-valve test</h3>
+    <ol class="steps">
+      <li>Confirm the reservoir is full, all tubing is secured, and Auto Mode is off.</li>
+      <li>Set the manual pump timeout longer than the pot duration and apply the setting.</li>
+      <li>Press <strong>Start Pump</strong>, then immediately press <strong>Activate Valve</strong> for the intended pot.</li>
+      <li>Watch the complete water path. Press <strong>Stop Pump</strong> immediately if water does not flow correctly; otherwise the timeout stops it automatically.</li>
+      <li>Repeat one channel at a time and record the delivered volume.</li>
+    </ol>
+  </section>
+
+  <section id="auto-mode">
+    <h2>7. Automatic operation</h2>
+    <p>The controller follows these steps in order. If a check fails, that pot is skipped; other workers and pots can still be checked.</p>
+    <ol class="steps">
+      <li><strong>Auto Mode:</strong> must be on.</li>
+      <li><strong>Data sync interval:</strong> when this timer is due, the main controller contacts each worker in turn. For example, <strong>3600 seconds</strong> means about once per hour. Only readings received during this check are used; a worker that does not answer is skipped.</li>
+      <li><strong>Auto mode start / pause time:</strong> the controller's local time must be inside this daily window. For example, 07:00 to 22:00 allows daytime watering. A start time later than the pause time creates an overnight window.</li>
+      <li><strong>Pot automatic watering interval:</strong> enough time must have passed since that pot last finished an automatic watering. For example, <strong>21600 seconds</strong> means at least six hours. This is checked only at a data-sync cycle, and a manual valve test does not restart this timer.</li>
+      <li><strong>Water tank level:</strong> must show <strong>High</strong>.</li>
+      <li><strong>Pot threshold:</strong> the sensor must be connected and its new reading must be above this setting. Higher readings mean drier soil. For example, with a threshold of <strong>2000</strong>, a reading of 2200 can water but 1800 cannot.</li>
+      <li><strong>Pump pre-run:</strong> if at least one pot passes every check, the pump starts first and runs alone for this time. The default is <strong>1 second</strong>.</li>
+      <li><strong>Pot duration:</strong> each selected valve opens for its own saved time, one valve at a time. The pump stops when watering finishes, a safety timeout occurs, or the tank becomes unsafe.</li>
+      <li><strong>Data sync interval:</strong> after the cycle, the workers enter low-power sleep until the next planned check.</li>
+    </ol>
+    <div class="callout caution"><strong>After restart:</strong> a normal power-on, software update, reset-button restart, or restart caused by unstable power begins with Auto Mode off. An unexpected automatic recovery may restore a previously enabled Auto Mode. Always check the Auto Mode status after a restart.</div>
+  </section>
+
+  <section id="calibration">
+    <h2>8. Soil and water calibration</h2>
+    <ol class="steps">
+      <li>Install each sensor at a consistent depth, away from the direct water outlet and pot edge.</li>
+      <li>Fully water the soil by hand, let excess water drain, and record the stable wet reading.</li>
+      <li>Allow the plant to reach the driest condition you consider acceptable and record that reading.</li>
+      <li>Choose an initial threshold between the wet and dry readings. Because higher means drier, the threshold should be above the normal wet value and no higher than the driest acceptable value.</li>
+      <li>With Auto Mode off, run a five-second supervised valve test and measure the water delivered.</li>
+      <li>Adjust duration in small steps. Recheck drainage, runoff, and the pump timeout after each change.</li>
+      <li>Observe several automatic cycles before leaving the system unattended. Calibrate every pot separately.</li>
+    </ol>
+  </section>
+
+  <section id="led">
+    <h2>9. Main status LED</h2>
+    <p>The main controller has two lights. The <strong>red power light</strong> stays on whenever power is present. The controlled <strong>blue status light</strong> uses the patterns below. All pattern descriptions and the diagram refer to the blue light.</p>
+    <p>When several conditions are active, the light shows the first matching item in this priority order:</p>
+    <p class="priority"><span>software update</span><b>›</b><span>low tank</span><b>›</b><span>Wi-Fi state</span><b>›</b><span>watering</span><b>›</b><span>checking workers</span><b>›</b><span>idle</span></p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Appearance</th><th>Meaning</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td>Off</td><td>Normal idle operation.</td><td>No action.</td></tr>
+        <tr><td>Slowly fades brighter and dimmer once every 2 seconds</td><td>Waiting for Wi-Fi setup, first connection, or reconnection.</td><td>Complete Wi-Fi setup or check the router.</td></tr>
+        <tr><td>One short flash</td><td>Wi-Fi has just connected.</td><td>No action.</td></tr>
+        <tr><td>One long flash every second: on for half a second, then off for half a second</td><td>The tank is Low.</td><td>Refill the tank and check the tank sensor.</td></tr>
+        <tr><td>Three quick flashes, then dark; repeats every 3 seconds</td><td>Watering or manual pump active.</td><td>Observe normal flow.</td></tr>
+        <tr><td>One medium flash, then dark; repeats every 3 seconds</td><td>Checking workers.</td><td>Wait for the check to finish.</td></tr>
+        <tr><td>Very fast continuous flashing, about 5 flashes per second</td><td>Main or worker software update.</td><td>Do not remove power.</td></tr>
+      </tbody>
+    </table></div>
+    <figure><img src="assets/main-led-patterns.svg" alt="Main-controller blue status-light patterns shown on matching three-second timelines for easy comparison."><figcaption>All rows use the same three-second scale. Filled blue sections mean the blue status light is on; the Wi-Fi search row shows gradual fading.</figcaption></figure>
+  </section>
+
+  <section id="updates" class="page-break">
+    <h2>10. Software updates</h2>
+    <p>The webpage calls this <strong>Firmware Update</strong>. “Firmware” simply means the software stored inside the main controller or worker.</p>
+    <aside class="callout warning"><strong>Before any update:</strong> turn Auto Mode off, wait until watering and worker checks have ended, confirm the reservoir and plumbing are safe, and maintain stable power and Wi-Fi.</aside>
+    <h3>Update the main controller</h3>
+    <ol>
+      <li>Open <strong>Firmware Update</strong> from the bottom of the home page.</li>
+      <li>Under <strong>Main</strong>, select the correct main-controller update file ending in <code>.ota</code>, then press <strong>Upload Firmware</strong>.</li>
+      <li>Confirm installation. Wait while the file uploads, is checked, and the controller restarts. Do not remove power.</li>
+      <li>Reconnect to the webpage and verify the installed version. Auto Mode remains off after the planned restart.</li>
+    </ol>
+    <h3>Update a worker</h3>
+    <ol>
+      <li>Under <strong>Worker Firmware</strong>, upload the correct worker update file ending in <code>.ota</code> once. The main controller checks and stores it.</li>
+      <li>In the worker table, press <strong>Update</strong> beside one worker.</li>
+      <li>Keep both devices powered and nearby through checking, connection, transfer, verification, reboot, and reconnect.</li>
+      <li>Confirm the worker reports its new installed version before starting another update.</li>
+    </ol>
+    <p>The controller checks that the file is for the correct device type and model, is not damaged, and has an allowed software version. The installed version cannot be installed again, and versions below the allowed minimum are rejected. Never try a file made for a different device.</p>
+  </section>
+
+  <section id="reset">
+    <h2>11. Reset and Wi-Fi clearing</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Control</th><th>What it removes</th><th>Next step</th></tr></thead>
+      <tbody>
+        <tr><td>Clear WiFi Credentials</td><td>Saved Wi-Fi network name and password only.</td><td>The current connection may remain active until restart. Turn the main controller off and on, or reset it, to return to Wi-Fi setup.</td></tr>
+        <tr><td>Reset All Settings</td><td>Wi-Fi name/password, controller settings, worker list, names, thresholds, durations, saved clock information, and the saved Auto Mode state.</td><td>Restart, set up Wi-Fi again, then add and recalibrate every worker.</td></tr>
+        <tr><td>Controller reset/restart</td><td>Does not erase saved settings.</td><td>Reconnect after startup and check that Auto Mode is off.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section id="troubleshooting">
+    <h2>12. Troubleshooting</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Symptom</th><th>Checks</th></tr></thead>
+      <tbody>
+        <tr><td>Cannot open the webpage</td><td>If the address worked before, restart the main controller and retry after Wi-Fi reconnects. If it never worked, confirm the phone is on the same Wi-Fi, turn off VPNs, and check whether the router blocks multicast. Contact support if necessary.</td></tr>
+        <tr><td>Blue status light keeps slowly fading</td><td>The main is not connected to Wi-Fi. Check router power, distance, network name, and password; clear the saved Wi-Fi information and restart setup if needed.</td></tr>
+        <tr><td>Tank says Low or Not Connected</td><td>Automatic watering requires High. Refill the reservoir, check sensor placement, connector seating, orientation, and wiring. Do not bypass the condition.</td></tr>
+        <tr><td>Worker never updates</td><td>Verify the exact 12-character Bluetooth device ID, worker power/battery, distance, and obstructions. Leave Auto Mode off and wait through at least one 30-second contact interval.</td></tr>
+        <tr><td>Automatic watering does not start</td><td>Check Auto Mode, local time/timezone, active window, the pot's required waiting time, tank High state, a new reading from the worker, a connected sensor, and a reading greater than the threshold.</td></tr>
+        <tr><td>Valve operates but pump does not</td><td>In manual mode the controls are independent. Start the pump separately and ensure its timeout exceeds the valve duration.</td></tr>
+        <tr><td>Pump runs but no water arrives</td><td>Stop it immediately. Check water level, pump priming, inlet/outlet direction, kinks, air leaks, blocked tubing, and correct valve channel. The controller has no pump-health feedback.</td></tr>
+        <tr><td>Watering amount is wrong</td><td>Recalibrate duration by measured volume and verify that sensor, valve, and pot numbers match. Check supply voltage, tubing length, and restrictions.</td></tr>
+        <tr><td>Software update is refused</td><td>Turn Auto Mode off, wait until the system is idle, choose the file for the correct device type and model, and check that it is neither the installed version nor below the permitted minimum.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+</main>
+
+<footer>
+  <p>V2 Main Controller development user manual · Behavior is based on the device software reviewed on 2026-08-17.</p>
+</footer>
+</body>
+</html>

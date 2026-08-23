@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 210" role="img" aria-labelledby="title desc">
+  <title id="title">Estimated worker light patterns on a seven-second scale</title>
+  <desc id="desc">Normal sensor reading shows two medium flashes near the start of about a seven-second awake cycle. A startup clock problem shows groups of three quick flashes every two seconds.</desc>
+  <defs><style>
+    .track{fill:#edf1ee;stroke:#cbd5e1}.on{fill:#2584d8}.label{font:600 16px system-ui,sans-serif;fill:#1f2937}
+    .tick{font:12px system-ui,sans-serif;fill:#64748b;text-anchor:middle}.grid{stroke:#cbd5e1;stroke-dasharray:3 5}.note{font:13px system-ui,sans-serif;fill:#64748b}
+  </style></defs>
+  <text class="label" x="15" y="52">Normal / 正常读取</text><rect class="track" x="220" y="28" width="720" height="34" rx="5"/><rect class="on" x="220" y="28" width="41" height="34"/><rect class="on" x="302" y="28" width="41" height="34"/>
+  <text class="label" x="15" y="117">Clock fault / 时钟故障</text><rect class="track" x="220" y="93" width="720" height="34" rx="5"/>
+  <g class="on">
+    <rect x="220" y="93" width="10" height="34"/><rect x="241" y="93" width="10" height="34"/><rect x="261" y="93" width="10" height="34"/>
+    <rect x="426" y="93" width="10" height="34"/><rect x="447" y="93" width="10" height="34"/><rect x="467" y="93" width="10" height="34"/>
+    <rect x="631" y="93" width="10" height="34"/><rect x="652" y="93" width="10" height="34"/><rect x="672" y="93" width="10" height="34"/>
+    <rect x="837" y="93" width="10" height="34"/><rect x="858" y="93" width="10" height="34"/><rect x="878" y="93" width="10" height="34"/>
+  </g>
+  <g><path class="grid" d="M220 23v110M323 23v110M426 23v110M529 23v110M631 23v110M734 23v110M837 23v110M940 23v110"/>
+    <text class="tick" x="220" y="153">0</text><text class="tick" x="323" y="153">1</text><text class="tick" x="426" y="153">2</text><text class="tick" x="529" y="153">3</text><text class="tick" x="631" y="153">4</text><text class="tick" x="734" y="153">5</text><text class="tick" x="837" y="153">6</text><text class="tick" x="940" y="153">7 s</text></g>
+  <text class="note" x="220" y="188">Normal timing is estimated / 正常读取时间为估算值</text>
+</svg>

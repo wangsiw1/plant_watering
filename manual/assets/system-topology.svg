@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" role="img" aria-labelledby="title desc">
+  <title id="title">Plant watering system topology</title>
+  <desc id="desc">A phone connects over Wi-Fi to the main controller. The main controller reads the tank sensor, controls the pump, and communicates over Bluetooth with eight-pot workers.</desc>
+  <defs>
+    <style>
+      .box{fill:#fff;stroke:#287a43;stroke-width:3}.soft{fill:#eef7f0;stroke:#7bae86;stroke-width:2}
+      .water{fill:#eef7fb;stroke:#2d7f9d;stroke-width:2}.line{fill:none;stroke:#334155;stroke-width:3;marker-end:url(#arrow)}
+      .dash{stroke-dasharray:9 7}.label{font:600 20px system-ui,sans-serif;fill:#173322;text-anchor:middle}
+      .small{font:16px system-ui,sans-serif;fill:#475569;text-anchor:middle}
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0l10 5-10 5z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect class="soft" x="30" y="120" width="180" height="105" rx="16"/>
+  <text class="label" x="120" y="160">Phone / 手机</text>
+  <text class="small" x="120" y="190">Web page / 网页</text>
+
+  <rect class="box" x="350" y="95" width="250" height="155" rx="18"/>
+  <text class="label" x="475" y="145">V2 Main / 主机</text>
+  <text class="small" x="475" y="178">Web page · tank · pump</text>
+  <text class="small" x="475" y="208">网页 · 水位 · 水泵</text>
+
+  <rect class="soft" x="750" y="35" width="180" height="105" rx="16"/>
+  <text class="label" x="840" y="75">8-pot Worker</text>
+  <text class="small" x="840" y="104">Sensors + valves</text>
+  <rect class="soft" x="750" y="220" width="180" height="105" rx="16"/>
+  <text class="label" x="840" y="260">More Workers</text>
+  <text class="small" x="840" y="289">Up to 8 configured</text>
+
+  <rect class="water" x="350" y="290" width="115" height="55" rx="12"/>
+  <text class="label" x="407" y="325">Tank</text>
+  <rect class="water" x="485" y="290" width="115" height="55" rx="12"/>
+  <text class="label" x="542" y="325">Pump</text>
+
+  <path class="line" d="M210 172h140"/>
+  <text class="small" x="280" y="155">Wi-Fi</text>
+  <path class="line dash" d="M600 145L750 90"/>
+  <path class="line dash" d="M600 205l150 55"/>
+  <text class="small" x="675" y="172">Bluetooth / 蓝牙</text>
+  <path class="line" d="M407 290v-40"/>
+  <path class="line" d="M542 290v-40"/>
+</svg>

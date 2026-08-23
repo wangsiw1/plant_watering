@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="V2 植物浇水主控制器开发版用户手册。">
+  <title>V2 主控制器用户手册</title>
+  <style>
+    :root{--ink:#17261d;--muted:#58645d;--green:#287a43;--green-soft:#eef7f0;--line:#d8e1da;--blue:#1769aa;--warn-bg:#fff7e6;--danger:#9b241b;--danger-bg:#fff0ee;--todo:#664d03;--todo-bg:#fff8d8}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:#f6f8f6;color:var(--ink);font:16px/1.68 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    main,header,footer{width:min(980px,calc(100% - 28px));margin:auto}header{padding:30px 0 18px}.eyebrow{color:var(--green);font-weight:750;letter-spacing:.08em;text-transform:uppercase;font-size:.82rem}
+    h1{font-size:clamp(2rem,5vw,3.2rem);line-height:1.15;margin:.25rem 0 .6rem}h2{margin-top:2.4rem;padding-bottom:.35rem;border-bottom:2px solid var(--line)}h3{margin-top:1.7rem}p,li{max-width:78ch}
+    a{color:var(--blue)}nav.top{display:flex;gap:10px 18px;flex-wrap:wrap;margin-top:16px}nav.top a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:#fff;text-decoration:none}
+    .meta{color:var(--muted)}.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:20px;margin:18px 0;box-shadow:0 2px 10px #16351f0b}
+    .toc ol{columns:2;column-gap:38px}.toc li{break-inside:avoid;margin:.28rem 0}.callout{border-left:5px solid;padding:13px 16px;margin:18px 0;border-radius:5px;background:#fff}
+    .warning{border-color:var(--danger);background:var(--danger-bg)}.caution{border-color:#d28b21;background:var(--warn-bg)}.note{border-color:var(--green);background:var(--green-soft)}
+    .todo{border:2px dashed #b58a16;background:var(--todo-bg);padding:13px 16px;border-radius:8px;margin:16px 0;color:var(--todo)}.todo strong{font-family:ui-monospace,monospace}
+    figure{margin:22px 0}figure img{display:block;width:100%;height:auto;max-height:680px;object-fit:contain;background:#fff;border:1px solid var(--line);border-radius:12px}figcaption{color:var(--muted);font-size:.92rem;margin-top:7px}.photo-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.photo-grid figure{margin:8px 0}
+    table{width:100%;border-collapse:collapse;margin:14px 0;background:#fff}th,td{border:1px solid var(--line);padding:10px 12px;text-align:left;vertical-align:top}th{background:var(--green-soft)}.table-wrap{overflow-x:auto}
+    .steps{counter-reset:step;list-style:none;padding:0}.steps>li{counter-increment:step;position:relative;padding:0 0 18px 48px;max-width:84ch}.steps>li:before{content:counter(step);position:absolute;left:0;top:0;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--green);color:#fff;font-weight:750}
+    .checklist li{margin:.45rem 0}.back{font-size:.9rem}.priority{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.priority span{padding:4px 8px;border-radius:6px;background:var(--green-soft);border:1px solid var(--line)}code{background:#eef1ee;padding:.12em .35em;border-radius:4px}
+    footer{color:var(--muted);padding:34px 0 60px}.page-break{break-before:page}
+    @media(max-width:680px){.toc ol{columns:1}.card{padding:15px}.photo-grid{grid-template-columns:1fr}th,td{padding:8px}.priority{display:block}.priority span{display:block;margin:5px 0}.priority b{display:none}}
+    @media print{body{background:#fff;font-size:11pt}header,main,footer{width:100%}nav.top{display:none}.card{box-shadow:none;break-inside:avoid}a{color:inherit;text-decoration:none}a[href]:after{content:""}.todo,.callout{break-inside:avoid}.table-wrap{overflow:visible}table{font-size:9pt;table-layout:fixed}th,td{overflow-wrap:anywhere}figure img{max-height:190mm}h2{break-after:avoid}}
+  </style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">开发版手册 · 已组装原型机</div>
+  <h1>V2 主控制器用户手册</h1>
+  <p class="meta">最近一次按设备软件（网页中称为“固件”）复核：2026-08-17 · 本开发版手册记录当前已确认的行为和随附硬件。</p>
+</header>
+
+<main>
+  <aside class="callout warning" aria-label="重要安全警告">
+    <strong>水与电气安全：</strong>主控制器、电源适配器、线缆和接头必须保持干燥。更改任何接线前先断开 12 V 电源。禁止水泵无水空转；在所有通道完成有人看守的漏水测试前，不要让系统无人值守自动运行。
+  </aside>
+
+  <section class="card toc" aria-labelledby="contents">
+    <h2 id="contents">目录</h2>
+    <ol>
+      <li><a href="#overview">系统概览</a></li><li><a href="#hardware">硬件与连接</a></li>
+      <li><a href="#first-start">首次启动与 Wi-Fi</a></li><li><a href="#interface">网页界面</a></li>
+      <li><a href="#workers">添加和配置工作节点</a></li><li><a href="#manual-mode">手动操作</a></li>
+      <li><a href="#auto-mode">自动操作</a></li><li><a href="#calibration">校准</a></li>
+      <li><a href="#led">状态 LED</a></li><li><a href="#updates">软件更新</a></li>
+      <li><a href="#reset">重置与清除 Wi-Fi</a></li><li><a href="#troubleshooting">故障排查</a></li>
+    </ol>
+  </section>
+
+  <section id="overview">
+    <h2>1. 系统概览</h2>
+    <p>V2 主控制器是系统的中心设备，需要持续供电。它提供控制网页、监测水箱、控制 12 V 水泵，并与已经配置的八盆工作节点交换读数和指令。手机或电脑通过 Wi-Fi 打开网页；工作节点通过蓝牙与主控制器通信。</p>
+    <p>当前设备软件最多可配置八个工作节点。每个工作节点单独处理，因此某个节点无响应时，其他已取得新读数的节点仍可继续检查。</p>
+    <figure><img src="assets/system-topology.svg" alt="手机通过 Wi-Fi 连接 V2 主控制器；主控制器连接水箱和水泵，并通过蓝牙与八盆工作节点通信。"><figcaption>系统角色和通信路径。主控制器和水泵需要持续供电；工作节点安装在花盆附近并管理传感器与阀门。</figcaption></figure>
+    <div class="callout note"><strong>互联网不是必需的：</strong>手动设置时间和正常浇水不依赖互联网。<strong>同步时间（NTP）</strong>按钮从互联网时间服务设置时钟，因此使用该按钮时需要联网。</div>
+    <div class="callout caution"><strong>仅限可信家庭网络：</strong>当前网页没有用户登录功能。不要让主控制器可以从互联网访问，也不要连接公共 Wi-Fi。</div>
+  </section>
+
+  <section id="hardware">
+    <h2>2. 硬件与连接</h2>
+    <figure><img src="assets/optimized/main_device_v2.jpg" alt="装在随附外壳中的 V2 主控制器，可见电源、水泵和水箱传感器连接区域。"><figcaption>装在随附外壳中的 V2 主控制器。请按设备标识和下面的连接说明操作。</figcaption></figure>
+    <figure><img src="assets/main-connections.svg" alt="主控制器概念连接图：12 V 适配器、水箱传感器和 12 V 水泵连接至主控制器，水管从水箱经水泵通往阀门。"><figcaption>概念安装图。请按设备上的接口标识连接，不要用力硬插。</figcaption></figure>
+
+    <h3>所需物品</h3>
+    <ul>
+      <li>已组装并装好设备软件的 V2 主控制器。</li><li>稳压 12 V、1 A DC 适配器，5.5 mm × 2.1 mm 圆孔插头，中心为正极、外圈为负极。</li>
+      <li>12 V、5 W 水泵。随附水泵标称最大流量 240 升/小时、最大扬程 3 米。</li><li>随附的外置水位传感器。</li>
+      <li>储水容器、合适的水管与接头，以及已配置的 V2 八盆工作节点。</li>
+      <li>与主控制器位于同一 2.4 GHz Wi-Fi 网络的手机或电脑。</li>
+    </ul>
+    <aside class="callout warning"><strong>保护水泵：</strong>禁止水泵无水空转，也不要在水管堵塞或折弯封闭时运行。240 升/小时和 3 米扬程为厂商标称值；实际流量会受到水管、扬水高度、阀门和阻力影响。</aside>
+    <figure><img src="assets/optimized/pump.jpg" alt="随附水泵的标注照片，A 口为进水口，B 口为出水口。"><figcaption>水泵接口：水箱供水管接进水口 A；出水口 B 接到为工作节点阀门供水的水管。</figcaption></figure>
+
+    <h3 id="tank-sensor">测试和校准水位传感器</h3>
+    <p>传感器连接好并且主控制器通电后，才能进行测试。传感器板上的红灯表示检测结果：该高度有水时红灯亮，水位低于该高度时红灯灭。这个传感器红灯与主控制器的红色电源灯不是同一个灯。</p>
+    <div class="photo-grid">
+      <figure><img src="assets/optimized/water_level_sensor_high_level.jpg" alt="水位传感器位于水箱外壁，传感器高度有水，因此红灯亮。"><figcaption>检测到水：传感器红灯亮。</figcaption></figure>
+      <figure><img src="assets/optimized/water_level_sensor_low_level.jpg" alt="水位传感器位于水箱外壁，水位低于传感器，因此红灯灭。"><figcaption>水位低：传感器红灯灭。</figcaption></figure>
+    </div>
+    <ol class="steps">
+      <li>粘贴前，先在水箱外壁移动已经通电的传感器。分别在背后有水的位置和高于水面的位置测试，确认红灯能正确亮起和熄灭。</li>
+      <li>检查时手和手指不要靠近传感器。传感器会对人体产生反应，触摸时可能错误地判断为有水。</li>
+      <li>需要校准时，把水箱加水到计划使用的最低水位，把传感器放在该水位线位置，不要触摸感应面。</li>
+      <li>按住校准按钮 2 秒，直到红灯开始闪烁。红灯开始闪烁后，松开按钮，并且在闪烁结束前不要触碰传感器。</li>
+      <li>红灯停止闪烁后校准完成。再次测试高、低水位显示，然后才启用自动浇水。</li>
+    </ol>
+
+    <h3>安装顺序</h3>
+    <ol class="steps">
+      <li>把主控制器和适配器放在可能溅水位置的上方，保持干燥和通风。Wi-Fi/蓝牙天线区域应远离金属和积水。</li>
+      <li>在断电状态下，按已确认的方向连接水位传感器。</li>
+      <li>把水泵进水口装入水箱，并把出水口接至工作节点阀门的供水管。固定所有水管。</li>
+      <li>按已确认的极性把水泵接到水泵输出。</li>
+      <li>给水箱加水，检查所有接头，确认无误后才连接 12 V 适配器。传感器红灯只有在完成此步骤后才会工作。</li>
+      <li>主控制器通电后，按照<a href="#tank-sensor">传感器测试</a>操作。在不触摸感应面的情况下沿水箱外壁移动传感器，确认能正确显示有水和低水位。</li>
+      <li>在壁厚小于 10 mm 的水箱<strong>外壁</strong>选择最终位置。传感器必须高于水泵，使低水位能在水泵露出水面前停止浇水。清洁并擦干外壁，把传感器牢固粘贴后再次测试。</li>
+      <li>保持<strong>自动模式关闭</strong>，按<a href="#manual-mode">第 6 节</a>进行有人看守的手动测试。如发生漏水、不出水、过热、异常声音或流向错误，立即停止。</li>
+    </ol>
+    <figure><img src="assets/optimized/water_level_sensor_below_pump.jpg" alt="水箱安装示例，水位传感器的位置高于水泵的最低安全水位。"><figcaption>传感器应高于水泵的最低安全水位，使主控制器能在水泵露出水面前停止浇水。</figcaption></figure>
+    <aside class="callout caution"><strong>仅限室内使用：</strong>随附外壳没有密封。必须避免溅水和结露，并只在人体感觉舒适的室内温度和湿度条件下使用。</aside>
+  </section>
+
+  <section id="first-start">
+    <h2>3. 首次启动与 Wi-Fi 设置</h2>
+    <ol class="steps">
+      <li>给主控制器通电。Wi-Fi 未连接时，蓝色状态灯会每两秒缓慢变亮、再变暗一次。</li>
+      <li>用手机或电脑加入名为 <code>plant-watering-XXXXXX</code> 的临时 Wi-Fi。末六位字符用于标识此主控制器。</li>
+      <li>在设置页面选择家中的 2.4 GHz Wi-Fi 并输入密码。在蓝色状态灯单次闪烁表示连接成功前，请留在设备附近。</li>
+      <li>如有需要，让手机或电脑重新连接家庭 Wi-Fi。</li>
+      <li>在浏览器打开 <code>http://plant-watering-XXXXXX.local</code>，其中六位字符与临时设置 Wi-Fi 名称一致。</li>
+      <li>完成工作节点设置与校准之前，保持自动模式关闭。</li>
+    </ol>
+    <div class="callout caution"><strong>每次重启都重新进入 Wi-Fi 设置：</strong>确认所选 Wi-Fi 可用且密码正确。正常启动无法连网时，主控制器会停留在设置流程。</div>
+    <aside class="callout note"><strong><code>.local</code> 地址无法打开时：</strong>如果之前可以使用但后来失效，请重启主控制器，等待 Wi-Fi 重新连接后再试。如果从未成功打开，请确认手机与主控制器连接同一个 Wi-Fi、关闭 VPN，并检查路由器是否阻止“组播”（本地设备互相查找时使用的网络通信）。无法检查或修改路由器设置时，请联系支持人员。</aside>
+  </section>
+
+  <section id="interface">
+    <h2>4. 网页界面</h2>
+    <h3>状态区域</h3>
+    <div class="table-wrap"><table><thead><tr><th>项目</th><th>含义</th></tr></thead><tbody>
+      <tr><td>当前时间</td><td>本地 24 小时时间、时区偏移和时钟来源。浇水时段按此时间判断。</td></tr>
+      <tr><td>水箱水位</td><td>只有<strong>高</strong>状态允许水泵运行和自动浇水。低或未连接均视为不安全，会阻止或停止自动浇水及手动水泵。</td></tr>
+      <tr><td>系统状态</td><td>就绪、同步中、浇水中、休眠中或更新中。</td></tr>
+      <tr><td>自动模式</td><td>是否启用按计划自动评估。</td></tr>
+      <tr><td>上次/下次同步</td><td>上次自动数据周期距今时间以及下次周期倒计时；仅在自动模式开启时显示。</td></tr>
+    </tbody></table></div>
+
+    <h3>设置与当前限制</h3>
+    <div class="table-wrap"><table><thead><tr><th>设置</th><th>默认值</th><th>允许范围与行为</th></tr></thead><tbody>
+      <tr><td>主控制器名称</td><td>控制器六位 ID</td><td>只使用英文字母或数字时最多 64 个字符；中文和表情符号占用空间较多，因此可输入的个数会少一些。工作节点和花盆名称也使用相同限制。</td></tr>
+      <tr><td>语言</td><td>English</td><td>英文或简体中文。</td></tr>
+      <tr><td>时区</td><td>UTC+00:00</td><td>UTC−14:00 至 UTC+14:00；界面以 15 分钟为步进。</td></tr>
+      <tr><td>自动模式时段</td><td>00:00–23:59</td><td>每天的开始和暂停时间。开始时间晚于暂停时间时表示跨夜时段。</td></tr>
+      <tr><td>数据同步间隔</td><td>3600 秒</td><td>60–2,419,200 秒。控制自动传感器周期和工作节点休眠时间。</td></tr>
+      <tr><td>水泵预运行</td><td>1 秒</td><td>0–30 秒。自动模式开启阀门前的水泵预运行时间。</td></tr>
+      <tr><td>手动水泵超时</td><td>10 秒</td><td>1–60 秒。独立“启动水泵”控制的安全定时器。</td></tr>
+      <tr><td>自动模式</td><td>关闭</td><td>开启后禁用手动控制。</td></tr>
+      <tr><td>花盆阈值</td><td>2000</td><td>0–4095。数值越高表示土壤越干；读数必须高于阈值才可自动浇水。</td></tr>
+      <tr><td>花盆浇水时长</td><td>5 秒</td><td>每盆 1–60 秒。</td></tr>
+      <tr><td>花盆自动浇水间隔</td><td>3600 秒</td><td>每盆 60–2,419,200 秒。该花盆自动浇水成功结束时，开始计算这段等待时间。</td></tr>
+    </tbody></table></div>
+    <h3>网页内容多久更新一次</h3>
+    <div class="table-wrap"><table><thead><tr><th>网页内容</th><th>正常更新频率</th></tr></thead><tbody>
+      <tr><td>主控制器状态：时间、水箱、系统状态、自动模式、计划时间和手动水泵</td><td>每 3 秒一次。</td></tr>
+      <tr><td>工作节点信息：电池、上次联系、信号强度、土壤读数和上次浇水</td><td>每 5 秒一次。</td></tr>
+      <tr><td>“调试”页面中的额外诊断信息</td><td>每 10 秒一次。</td></tr>
+      <tr><td><strong>“固件更新”</strong>页面中的软件版本和更新进度</td><td>每 2 秒一次。</td></tr>
+      <tr><td>保存、删除或重置某项之后</td><td>约 0.3 秒后额外请求更新一次。</td></tr>
+    </tbody></table></div>
+    <p>输入名称或设置时，网页不会用自动更新的数据覆盖正在输入的内容。离开网页前，请使用相应的<strong>应用</strong>按钮保存。</p>
+    <p>主控制器设置使用<strong>应用设置</strong>保存。工作节点和花盆的修改使用各自的<strong>应用</strong>按钮或<strong>全部应用</strong>。存在未保存的修改时不要离开页面。</p>
+    <h3>时钟设置</h3>
+    <p>使用每日时段前先选择时区。按<strong>同步时间（NTP）</strong>可从互联网设置时钟；离线时也可手动输入当前 <code>HH:MM</code>。互联网时间同步失败不会清除当前时钟。</p>
+  </section>
+
+  <section id="workers">
+    <h2>5. 添加和配置工作节点</h2>
+    <ol class="steps">
+      <li>给工作节点通电并找到其 12 位蓝牙设备编号，网页中称为 MAC 地址。只使用数字 0–9 和字母 A–F，不输入空格或标点。</li>
+      <li>在<strong>工作节点</strong>区域输入设备编号，可选填名称，然后按<strong>添加工作节点</strong>。</li>
+      <li>等待主控制器联系该节点。手动模式下通常约每 30 秒联系一次。</li>
+      <li>首次收到回复后，界面显示该节点的八个花盆。检查电池、距上次联系的时间、信号强度和土壤读数。</li>
+      <li>为工作节点和各花盆命名，设置并保存每盆阈值、浇水时长和自动浇水间隔。</li>
+    </ol>
+    <p>工作节点尚未发送第一次读数或传感器不可用时，手动阀门按钮保持禁用。从主控制器删除节点会清除该主机保存的节点名称和花盆设置。把节点转移到其他主控制器前，请按工作节点的配对说明操作。</p>
+  </section>
+
+  <section id="manual-mode">
+    <h2>6. 手动操作</h2>
+    <p>手动模式是默认的设置和测试模式。已配置工作节点保持唤醒，主控制器约每 30 秒联系一次，因此耗电量高于自动模式。</p>
+    <aside class="callout warning"><strong>两个手动控制相互独立。</strong><strong>启动水泵</strong>只控制水泵；<strong>启动阀门</strong>只让所选花盆阀门按其设定时长动作。仅当水箱读数为高水位时才能启动水泵；如果读数变为不安全，水泵会自动停止。先确认水量充足，严禁水泵空转。</aside>
+    <h3>有人看守的水泵与阀门测试</h3>
+    <ol class="steps">
+      <li>确认水箱有水、所有水管已固定、自动模式已关闭。</li>
+      <li>把手动水泵超时设为大于花盆阀门时长，并应用设置。</li>
+      <li>按<strong>启动水泵</strong>，随后立即按目标花盆的<strong>启动阀门</strong>。</li>
+      <li>观察完整水路。流向不正确或不出水时立即按<strong>停止水泵</strong>；否则到达超时后会自动停止。</li>
+      <li>每次只测试一个通道，并记录出水量。</li>
+    </ol>
+  </section>
+
+  <section id="auto-mode">
+    <h2>7. 自动操作</h2>
+    <p>主控制器按以下顺序工作。某项检查未通过时会跳过该花盆，其他工作节点和花盆仍可继续检查。</p>
+    <ol class="steps">
+      <li><strong>自动模式：</strong>必须开启。</li>
+      <li><strong>数据同步间隔：</strong>计时到期后，主控制器逐一联系各工作节点。例如设为 <strong>3600 秒</strong>，表示约每小时一次。只使用本次检查中新收到的读数；无响应的工作节点会被跳过。</li>
+      <li><strong>自动模式开始/暂停时间：</strong>主控制器的本地时间必须位于每日时段内。例如 07:00 至 22:00 表示只允许白天浇水。开始时间晚于暂停时间时表示跨夜时段。</li>
+      <li><strong>花盆自动浇水间隔：</strong>该花盆距上次自动浇水完成必须已过足够时间。例如 <strong>21600 秒</strong>表示至少六小时。此条件只在数据同步周期检查，手动测试阀门不会重新计算该时间。</li>
+      <li><strong>水箱水位：</strong>必须显示为<strong>高</strong>。</li>
+      <li><strong>花盆阈值：</strong>传感器必须已连接，并且新读数高于此设置。数值越高表示土壤越干。例如阈值设为 <strong>2000</strong> 时，读数 2200 可以浇水，1800 不可以。</li>
+      <li><strong>水泵预运行：</strong>至少一个花盆通过全部检查时，水泵先单独运行这段时间。默认值为 <strong>1 秒</strong>。</li>
+      <li><strong>花盆浇水时长：</strong>每个选中阀门按照各自保存的时长依次打开。浇水完成、达到安全超时或水箱变为不安全时，水泵停止。</li>
+      <li><strong>数据同步间隔：</strong>周期结束后，工作节点进入低功耗休眠，直到下次计划检查。</li>
+    </ol>
+    <div class="callout caution"><strong>重启后：</strong>正常上电、软件更新、按复位键重启或电源不稳定引起的重启，都会以自动模式关闭开始。意外自动恢复有可能还原之前已开启的自动模式。每次重启后都应检查自动模式状态。</div>
+  </section>
+
+  <section id="calibration">
+    <h2>8. 土壤与出水量校准</h2>
+    <ol class="steps">
+      <li>把各传感器安装在一致深度，远离花盆边缘和直接出水口。</li>
+      <li>手动把土壤浇透，待多余水分排出后记录稳定的湿土读数。</li>
+      <li>让植物达到可接受的最干状态，记录此时读数。</li>
+      <li>在湿土和干土读数之间选择初始阈值。由于数值越高越干，阈值应高于正常湿土值且不高于可接受的最干值。</li>
+      <li>关闭自动模式，进行有人看守的 5 秒阀门测试并测量出水量。</li>
+      <li>小幅调整浇水时长。每次修改后检查排水、溢流和水泵超时。</li>
+      <li>先观察多个自动周期，再让系统无人值守运行。每盆分别校准。</li>
+    </ol>
+  </section>
+
+  <section id="led">
+    <h2>9. 主控制器状态 LED</h2>
+    <p>主控制器有两个灯。<strong>红色电源灯</strong>在设备有电时会一直亮；受软件控制的<strong>蓝色状态灯</strong>使用下表灯效。以下灯效说明和图示全部指蓝灯。</p>
+    <p>多个状态同时存在时，灯会按以下优先顺序显示最前面的状态：</p>
+    <p class="priority"><span>软件更新</span><b>›</b><span>水箱低水位</span><b>›</b><span>Wi-Fi 状态</span><b>›</b><span>浇水</span><b>›</b><span>检查工作节点</span><b>›</b><span>空闲</span></p>
+    <div class="table-wrap"><table><thead><tr><th>灯效</th><th>含义</th><th>操作</th></tr></thead><tbody>
+      <tr><td>熄灭</td><td>正常空闲。</td><td>无需操作。</td></tr>
+      <tr><td>每 2 秒缓慢变亮、再变暗一次</td><td>等待 Wi-Fi 设置、首次连接或重新连接。</td><td>完成 Wi-Fi 设置或检查路由器。</td></tr>
+      <tr><td>短闪一次</td><td>Wi-Fi 刚刚连接成功。</td><td>无需操作。</td></tr>
+      <tr><td>每秒长闪一次：亮半秒、灭半秒</td><td>水箱为低水位。</td><td>补水并检查水位传感器。</td></tr>
+      <tr><td>快速闪三次后熄灭；每 3 秒重复</td><td>正在浇水或手动水泵已开启。</td><td>观察正常水流。</td></tr>
+      <tr><td>中等长度闪一次后熄灭；每 3 秒重复</td><td>正在检查工作节点。</td><td>等待检查结束。</td></tr>
+      <tr><td>持续快速闪烁，约每秒闪 5 次</td><td>主控制器或工作节点正在更新设备软件。</td><td>不要断电。</td></tr>
+    </tbody></table></div>
+    <figure><img src="assets/main-led-patterns.svg" alt="主控制器蓝色状态灯的各种灯效使用相同的三秒时间轴显示，便于比较。"><figcaption>所有行都使用相同的 3 秒比例。蓝色填充区域表示蓝色状态灯亮；搜索 Wi-Fi 一行表示逐渐变亮和变暗。</figcaption></figure>
+  </section>
+
+  <section id="updates" class="page-break">
+    <h2>10. 软件更新</h2>
+    <p>网页中此功能称为<strong>固件更新</strong>。“固件”就是保存在主控制器或工作节点内部的软件。</p>
+    <aside class="callout warning"><strong>更新前：</strong>关闭自动模式，等待浇水和工作节点检查结束，确认水箱和水路处于安全状态，并保持电源与 Wi-Fi 稳定。</aside>
+    <h3>更新主控制器</h3>
+    <ol>
+      <li>从主页底部打开<strong>固件更新</strong>。</li><li>在<strong>主控制器</strong>区域选择正确的主控制器更新文件（文件名以 <code>.ota</code> 结尾），然后按<strong>上传固件</strong>。</li>
+      <li>确认安装，等待文件上传、检查和主控制器重启。不要断电。</li><li>重新打开网页并确认已安装版本。计划内重启后自动模式保持关闭。</li>
+    </ol>
+    <h3>更新工作节点</h3>
+    <ol>
+      <li>在<strong>工作节点固件</strong>区域上传一次正确的工作节点更新文件（文件名以 <code>.ota</code> 结尾）；主控制器会检查并保存此文件。</li>
+      <li>在工作节点列表中，按目标节点旁的<strong>更新</strong>。</li>
+      <li>检查、连接、传输、验证、重启和重新连接期间，让两台设备保持供电并靠近。</li>
+      <li>确认目标节点上报新版本后再开始更新另一个节点。</li>
+    </ol>
+    <p>主控制器会检查文件是否适用于正确的设备类型和型号、文件是否损坏，以及软件版本是否允许。不能重复安装当前版本，低于允许最低版本的文件会被拒绝。禁止尝试使用其他设备的文件。</p>
+  </section>
+
+  <section id="reset">
+    <h2>11. 重置与清除 Wi-Fi</h2>
+    <div class="table-wrap"><table><thead><tr><th>控制项</th><th>清除内容</th><th>后续操作</th></tr></thead><tbody>
+      <tr><td>清除 Wi-Fi 信息</td><td>仅清除保存的 Wi-Fi 名称和密码。</td><td>当前连接可能保持到重启。关闭后重新开启或复位主控制器，才能再次进入 Wi-Fi 设置。</td></tr>
+      <tr><td>重置所有设置</td><td>Wi-Fi 名称/密码、主控制器设置、工作节点列表、名称、阈值、时长、保存的时钟信息和自动模式状态。</td><td>重启并重新设置 Wi-Fi，然后重新添加和校准全部工作节点。</td></tr>
+      <tr><td>主控制器复位/重启</td><td>不会清除已保存设置。</td><td>启动后重新连接并确认自动模式为关闭。</td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section id="troubleshooting">
+    <h2>12. 故障排查</h2>
+    <div class="table-wrap"><table><thead><tr><th>现象</th><th>检查项目</th></tr></thead><tbody>
+      <tr><td>无法打开网页</td><td>如果地址之前可用，请重启主控制器并等待 Wi-Fi 重新连接后再试。如果从未可用，请确认手机连接同一个 Wi-Fi、关闭 VPN，并检查路由器是否阻止组播。必要时联系支持人员。</td></tr>
+      <tr><td>蓝色状态灯一直缓慢明暗变化</td><td>主控制器未连接 Wi-Fi。检查路由器电源、距离、网络名称和密码；必要时清除已保存的 Wi-Fi 信息并重新开始设置。</td></tr>
+      <tr><td>水箱显示低或未连接</td><td>自动浇水要求高状态。补水并检查传感器位置、接头、方向和接线，禁止绕过此条件。</td></tr>
+      <tr><td>工作节点数据始终不更新</td><td>核对 12 位蓝牙设备编号、工作节点电源/电池、距离和遮挡。关闭自动模式并至少等待一个约 30 秒的联系周期。</td></tr>
+      <tr><td>自动浇水不启动</td><td>检查自动模式、本地时间/时区、运行时段、花盆所需等待时间、水箱为高、工作节点返回了新读数、传感器已连接以及读数高于阈值。</td></tr>
+      <tr><td>阀门动作但水泵不转</td><td>手动模式下两项控制独立。单独启动水泵，并确保超时时间大于阀门时长。</td></tr>
+      <tr><td>水泵运行但没有水</td><td>立即停止。检查水位、水泵排气、进出水方向、水管折弯、漏气、堵塞和阀门通道。控制器无法检测水泵健康状态。</td></tr>
+      <tr><td>出水量不正确</td><td>按实测体积重新校准时长，并确认传感器、阀门和花盆编号一致。检查电压、水管长度和阻塞。</td></tr>
+      <tr><td>软件更新被拒绝</td><td>关闭自动模式，等待系统空闲，选择适用于正确设备类型和型号的文件，并确认不是当前版本且不低于最低允许版本。</td></tr>
+    </tbody></table></div>
+  </section>
+
+</main>
+
+<footer><p>V2 主控制器开发版用户手册 · 行为依据 2026-08-17 复核的设备软件。</p></footer>
+</body>
+</html>

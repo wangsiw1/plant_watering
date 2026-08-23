@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Development user manual for the V2 eight-pot plant-watering worker.">
+  <title>V2 8-Pot Worker User Manual</title>
+  <style>
+    :root{--ink:#17261d;--muted:#58645d;--green:#287a43;--green-soft:#eef7f0;--line:#d8e1da;--blue:#1769aa;--warn-bg:#fff7e6;--danger:#9b241b;--danger-bg:#fff0ee;--todo:#664d03;--todo-bg:#fff8d8}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:#f6f8f6;color:var(--ink);font:16px/1.58 system-ui,-apple-system,"Segoe UI",sans-serif}
+    main,header,footer{width:min(980px,calc(100% - 28px));margin:auto}header{padding:30px 0 18px}.eyebrow{color:var(--green);font-weight:750;letter-spacing:.08em;text-transform:uppercase;font-size:.82rem}
+    h1{font-size:clamp(2rem,5vw,3.2rem);line-height:1.08;margin:.25rem 0 .6rem}h2{margin-top:2.4rem;padding-bottom:.35rem;border-bottom:2px solid var(--line)}h3{margin-top:1.7rem}p,li{max-width:78ch}
+    a{color:var(--blue)}nav.top{display:flex;gap:10px 18px;flex-wrap:wrap;margin-top:16px}nav.top a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:#fff;text-decoration:none}
+    .meta{color:var(--muted)}.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:20px;margin:18px 0;box-shadow:0 2px 10px #16351f0b}
+    .toc ol{columns:2;column-gap:38px}.toc li{break-inside:avoid;margin:.28rem 0}.callout{border-left:5px solid;padding:13px 16px;margin:18px 0;border-radius:5px;background:#fff}
+    .warning{border-color:var(--danger);background:var(--danger-bg)}.caution{border-color:#d28b21;background:var(--warn-bg)}.note{border-color:var(--green);background:var(--green-soft)}
+    .todo{border:2px dashed #b58a16;background:var(--todo-bg);padding:13px 16px;border-radius:8px;margin:16px 0;color:var(--todo)}.todo strong{font-family:ui-monospace,monospace}
+    figure{margin:22px 0}figure img{display:block;width:100%;height:auto;max-height:680px;object-fit:contain;background:#fff;border:1px solid var(--line);border-radius:12px}figcaption{color:var(--muted);font-size:.92rem;margin-top:7px}.photo-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.photo-grid figure{margin:8px 0}
+    table{width:100%;border-collapse:collapse;margin:14px 0;background:#fff}th,td{border:1px solid var(--line);padding:10px 12px;text-align:left;vertical-align:top}th{background:var(--green-soft)}.table-wrap{overflow-x:auto}
+    .steps{counter-reset:step;list-style:none;padding:0}.steps>li{counter-increment:step;position:relative;padding:0 0 18px 48px;max-width:84ch}.steps>li:before{content:counter(step);position:absolute;left:0;top:0;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--green);color:#fff;font-weight:750}
+    code{background:#eef1ee;padding:.12em .35em;border-radius:4px}footer{color:var(--muted);padding:34px 0 60px}.back{font-size:.9rem}.page-break{break-before:page}
+    @media(max-width:680px){.toc ol{columns:1}.card{padding:15px}.photo-grid{grid-template-columns:1fr}th,td{padding:8px}}
+    @media print{body{background:#fff;font-size:11pt}header,main,footer{width:100%}nav.top{display:none}.card{box-shadow:none;break-inside:avoid}a{color:inherit;text-decoration:none}a[href]:after{content:""}.todo,.callout{break-inside:avoid}.table-wrap{overflow:visible}table{font-size:9pt;table-layout:fixed}th,td{overflow-wrap:anywhere}figure img{max-height:190mm}h2{break-after:avoid}}
+  </style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">Development manual · assembled prototype</div>
+  <h1>V2 8-Pot Worker User Manual</h1>
+  <p class="meta">Last reviewed against device software (“firmware”): 2026-08-17 · This development manual documents confirmed current behavior and supplied hardware.</p>
+</header>
+
+<main>
+  <aside class="callout warning" aria-label="Critical safety warning">
+    <strong>Battery, water, and moving water:</strong> keep the worker, charger, battery, and connectors dry. Disconnect charging and battery power before changing sensors or valves. Stop using a swollen, hot, punctured, wet, or otherwise damaged rechargeable lithium battery and follow local disposal rules.
+  </aside>
+
+  <section class="card toc" aria-labelledby="contents">
+    <h2 id="contents">Contents</h2>
+    <ol>
+      <li><a href="#overview">Worker overview</a></li>
+      <li><a href="#hardware">Hardware and channel mapping</a></li>
+      <li><a href="#installation">Installation</a></li>
+      <li><a href="#pairing">Power-up and pairing</a></li>
+      <li><a href="#operation">Normal operation</a></li>
+      <li><a href="#led">Worker LED</a></li>
+      <li><a href="#battery">Battery and charging</a></li>
+      <li><a href="#update">Software update</a></li>
+      <li><a href="#maintenance">Maintenance</a></li>
+      <li><a href="#troubleshooting">Troubleshooting</a></li>
+    </ol>
+  </section>
+
+  <section id="overview">
+    <h2>1. Worker overview</h2>
+    <p>The V2 eight-pot worker reads up to eight soil-moisture sensors, reports soil and battery readings to the V2 main controller, and operates up to eight valves. It has no webpage of its own. Names, dryness thresholds, valve times, manual tests, automatic schedules, and software updates are all controlled from the main controller.</p>
+    <p>The worker uses Bluetooth to exchange instructions and readings with one main controller at a time. In manual mode it stays awake for quick testing. In Auto Mode, the main controller tells it when to wake and when to enter low-power sleep between checks.</p>
+    <figure>
+      <img src="assets/system-topology.svg" alt="Phone connected by Wi-Fi to the V2 main controller, which communicates by Bluetooth with eight-pot workers controlling sensors and valves.">
+      <figcaption>The worker is a battery-powered device placed near the pots. Use the main controller's webpage for all settings.</figcaption>
+    </figure>
+  </section>
+
+  <section id="hardware">
+    <h2>2. Hardware and channel mapping</h2>
+    <figure>
+      <img src="assets/optimized/worker_device_v2.jpg" alt="V2 eight-pot worker in its supplied case, showing the battery, control board, connectors, and power button marked by a yellow circle.">
+      <figcaption>Worker in its supplied case. The power button is inside the yellow circle. Press it once to turn on and once again to turn off.</figcaption>
+    </figure>
+    <p>The worker contains a rechargeable battery, built-in USB-C charging section, its control board, eight soil-sensor connections, and eight valve connections. Use the supplied common <strong>Soil Moisture Sensor V2.0</strong> design and only the valves verified and supplied by the project owner. The worker reads the sensors through one shared circuit and opens valves one at a time to limit electrical load and water flow.</p>
+
+    <div class="photo-grid">
+      <figure><img src="assets/optimized/worker_device_connector_number.jpg" alt="Worker connector row labeled in physical groups 1 and 2, 3 and 4, 5 and 6, and 7 and 8 from left to right."><figcaption>Physical channel numbering, left to right: 1–2, 3–4, 5–6, then 7–8.</figcaption></figure>
+      <figure><img src="assets/optimized/worker_device_sensor_valve_connector.jpg" alt="Worker connection rows showing the larger soil-sensor connectors and smaller matching valve connectors for channels 1 through 8."><figcaption>Each channel has one soil-sensor connector and one matching valve connector. Match them by the printed channel number.</figcaption></figure>
+    </div>
+
+    <figure>
+      <img src="assets/worker-channels.svg" alt="Eight-pot mapping showing sensor S1 paired with valve V1 and Pot 1, continuing through sensor S8, valve V8, and Pot 8.">
+      <figcaption><strong>Channel rule:</strong> Sensor N, Valve N, and Pot N must always refer to the same plant.</figcaption>
+    </figure>
+    <aside class="callout caution"><strong>Check the number before every connection.</strong> The physical connectors run from channels 1–2 on the left to 7–8 on the right, as photographed above. Sensor N, Valve N, displayed Pot N, and the actual plant must all have the same number.</aside>
+  </section>
+
+  <section id="installation">
+    <h2>3. Installation</h2>
+    <ol class="steps">
+      <li>Place the worker above possible spill level in a dry, ventilated location close enough for all eight sensor and valve cables. Keep its antenna area away from metal, the battery, and standing water.</li>
+      <li>With battery and charger disconnected, assign each plant a permanent channel number from 1 through 8.</li>
+      <li>Install each Soil Moisture Sensor V2.0 at a consistent depth, away from the pot wall and direct watering outlet. Insert it only up to the white line shown below. Do not bury the sensor board, exposed electronics, or cable joints.</li>
+      <li>Connect each sensor to the matching sensor channel using the confirmed polarity and orientation.</li>
+      <li>Install the matching supplied valve in the water line. Connect port A to the water input, port B to the tube for that plant, and port C to the next valve or the return tube to the water tank. Connect its cable to the same-numbered valve channel.</li>
+      <li>Insulate every extension-cable joint, the sensor-board connector area, and the valve's electrical parts as shown below. Secure tubing and wiring so a leak cannot run toward any connector, board, battery, or charger.</li>
+      <li>Connect the approved battery, then follow <a href="#pairing">Section 4</a>. Test one channel at a time from the main controller before enabling automatic watering.</li>
+    </ol>
+    <figure><img src="assets/optimized/moisture_sensor.jpg" alt="Soil Moisture Sensor V2.0 with a white line marking its maximum insertion depth."><figcaption><strong>Maximum depth: up to the white line on the sensor.</strong> Keep the sensor board and connector above the soil.</figcaption></figure>
+    <figure><img src="assets/optimized/valve.jpg" alt="Three-port watering valve annotated with port A as water input, port B as the tube to the plant, and port C as the tube to the next valve or back to the tank."><figcaption>Valve flow: A is the water input; B goes to the plant; C goes to the next valve or back to the tank. With the valve off, water flows from A to C. When the valve is activated, water flows from A to B.</figcaption></figure>
+    <div class="photo-grid">
+      <figure><img src="assets/optimized/moisture_sensor_insulate_tape.jpg" alt="Comparison of a soil-sensor connector and board left exposed and the same area fully wrapped with insulating tape."><figcaption>Wrap the sensor-board connector area, while leaving the sensing blade below the white line uncovered.</figcaption></figure>
+      <figure><img src="assets/optimized/wire_connector_insulate_tape.jpg" alt="Comparison of an exposed extension-cable plug and a joined plug fully wrapped with insulating tape."><figcaption>Join each extension plug fully, then wrap the entire joint with insulating tape.</figcaption></figure>
+      <figure><img src="assets/optimized/valve_insulate_tape.jpg" alt="Comparison of exposed valve wires and valve electrical parts protected with insulating tape."><figcaption>Wrap the valve wire connection and electrical area; leave all water ports clear.</figcaption></figure>
+    </div>
+    <aside class="callout warning"><strong>Insulating tape is extra protection, not waterproofing.</strong> Keep the sensor boards, cable joints, valves, and worker dry and away from splashes or condensation. Replace loose, torn, or wet tape before use.</aside>
+    <aside class="callout caution"><strong>Indoor case only:</strong> the supplied case is not sealed. Always protect it from splashes and condensation, and use it only in indoor temperature and humidity conditions comfortable for people.</aside>
+  </section>
+
+  <section id="pairing">
+    <h2>4. Power-up and pairing</h2>
+    <h3>First association</h3>
+    <ol class="steps">
+      <li>Charge the included battery if needed, then press the power button once to turn on the worker.</li>
+      <li>Observe startup. The red power light remains on and a normal worker begins sensor reading; its blue status light flashes twice during a reading cycle. A repeating three-flash blue-light fault is described in <a href="#led">Section 6</a>.</li>
+      <li>Read the worker's 12-character Bluetooth device ID from the label on the outside of its case. The main-controller page calls this a MAC address. It uses only numbers 0–9 and letters A–F.</li>
+      <li>On the main controller, leave Auto Mode off. Enter the device ID in <strong>Add Worker</strong> and optionally assign a name.</li>
+      <li>Wait through at least one contact interval, normally about 30 seconds. The first valid instruction links the worker to that main controller.</li>
+      <li>Confirm that eight pots, battery percentage, time since last contact, signal strength, and soil readings appear. Test all channels under supervision.</li>
+    </ol>
+
+    <h3>Move a worker to another main controller</h3>
+    <p>Remove it from the old main controller first. If it receives nothing from that controller for about five minutes while awake, it forgets the old link and becomes available for setup again. Completely disconnecting and reconnecting the battery also clears the remembered link. Add it to the new main only after one of these actions.</p>
+  </section>
+
+  <section id="operation">
+    <h2>5. Normal operation</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Condition</th><th>Worker behavior</th></tr></thead>
+      <tbody>
+        <tr><td>Not yet linked</td><td>Reads sensors and battery, then makes itself available to a main controller about every 10 seconds during setup. It does not accept watering instructions meant for another device.</td></tr>
+        <tr><td>Main in manual mode</td><td>Stays awake, waits about five seconds after one sensor-reading cycle before starting the next, and remains ready for contact, valve tests, or update preparation. Including measurement time, a full cycle repeats roughly every seven seconds. This gives quick control but uses more battery.</td></tr>
+        <tr><td>Main in Auto Mode</td><td>Wakes at the planned time, answers the main controller with new readings, opens selected valves one at a time, confirms when finished, then enters timed low-power sleep when instructed.</td></tr>
+        <tr><td>No contact from the main for about five minutes while awake</td><td>Forgets the main controller and becomes available for setup again.</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>Sensor and valve behavior</h3>
+    <ul>
+      <li>Each sensor-reading cycle checks the battery first and then all soil channels. While awake, the worker waits about five seconds after that work before starting the next cycle; including measurement time, the normal light pattern repeats roughly every seven seconds.</li>
+      <li>Higher soil readings mean drier soil.</li>
+      <li>A watering command can select several pots, but the worker operates their valves one at a time for each configured duration.</li>
+      <li>Battery sampling is deferred while valves are active and briefly after they turn off, so the displayed battery value may not change immediately during watering.</li>
+      <li>The worker enters sleep only after it has told the main controller that the task is complete.</li>
+    </ul>
+    <div class="callout note"><strong>When updates can be delayed:</strong> a sleeping worker is not continuously available. Its next update depends on the main controller's <strong>Data sync interval</strong>. Turn Auto Mode off during setup or troubleshooting so linked workers remain awake.</div>
+  </section>
+
+  <section id="led">
+    <h2>6. Worker LED</h2>
+    <p>The worker has a <strong>red power light</strong> that remains on while the worker is powered. Its controlled <strong>blue status light</strong> shares an electrical connection with the circuit that selects soil sensors. For this reason, the blue light also flashes as sensors are read and is not a general-purpose status light. All patterns below refer to the blue light.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Appearance</th><th>Meaning</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td>Two medium flashes, each about 0.4 seconds, with about 0.4 seconds between them; repeats roughly every 7 seconds while awake</td><td>Normal sensor reading. This timing is an estimate and may shift slightly while the worker is busy.</td><td>No action.</td></tr>
+        <tr><td>Three quick flashes every 2 seconds for 1 minute</td><td>A small clock part used for low-power timing did not start correctly.</td><td>Allow the automatic retry. If the pattern returns, power down and have the worker inspected.</td></tr>
+        <tr><td>Light stays off for about 5 seconds after the one-minute fault pattern</td><td>The worker is taking a short recovery sleep before it tries the clock part again.</td><td>Do not treat this dark period as a successful startup; wait for the next result.</td></tr>
+      </tbody>
+    </table></div>
+    <p>A successful clock check has no separate success flash. The normal two-flash sensor pattern can begin afterward.</p>
+    <figure><img src="assets/worker-led-patterns.svg" alt="Worker blue status-light patterns showing an estimated normal two-flash sensor-reading cycle and a repeating three-flash startup fault."><figcaption>Blue sections mean the blue status light is on. The normal row is estimated from the sensor-reading sequence: two medium flashes about 0.4 seconds apart, repeating roughly every 7 seconds while awake. The fault row repeats every 2 seconds for 1 minute, followed by about 5 seconds dark before retry.</figcaption></figure>
+  </section>
+
+  <section id="battery">
+    <h2>7. Battery and charging</h2>
+    <h3>Battery and power button</h3>
+    <ul>
+      <li>The worker uses a 3.7 V rechargeable lithium-polymer battery.</li>
+      <li>The included battery is 2200 mAh and uses a 2-pin XH2.54 connector. Any approved replacement must be a 3.7 V lithium-polymer battery rated at least 1500 mAh, with the same connector and wire polarity as the supplied battery.</li>
+      <li>The battery is taped to the circuit board. Do not pull, puncture, bend, or pry it away from the board.</li>
+      <li>Press the power button once to turn the worker on. Press it once again to turn the worker off.</li>
+    </ul>
+    <aside class="callout warning"><strong>Battery connector polarity:</strong> match the supplied battery's connector and wire order exactly. Do not guess, reverse, or reconnect the battery based only on connector shape. Obtain an approved replacement from the project owner if there is any doubt.</aside>
+    <p>Treat the displayed battery percentage as an estimate, not an exact remaining-time promise. Watch the trend over several updates and charge before a long unattended run. An unexpected large drop can also mean the battery or its connection needs inspection.</p>
+    <p>A displayed battery level of about 3% or lower causes the worker to shut down to protect the battery. Charge it, then press the power button once to turn it on again.</p>
+    <aside class="callout warning"><strong>Rechargeable lithium battery safety:</strong> use only the approved battery and charging method. Charge on a nonflammable surface away from water and unattended plants. Stop immediately if the battery swells, leaks, becomes hot, smells unusual, or has damaged insulation.</aside>
+    <h3>USB-C charging</h3>
+    <ul>
+      <li>Use a charger rated for 5 V and at least 1.5 A. Connect it to the USB Type-C port exposed on the back of the case; the charging module is already built into the worker.</li>
+      <li>The worker may remain switched on and operating while charging.</li>
+      <li>The charging section has four red charge-level lights. They illuminate during charging; all four are on when charging is complete.</li>
+    </ul>
+    <aside class="callout note"><strong>Do not confuse the lights:</strong> the four red charging lights belong to the charger section. The separate red power light shows that the worker is on, and the blue light shows worker status.</aside>
+  </section>
+
+  <section id="update" class="page-break">
+    <h2>8. Worker software update</h2>
+    <p>The main-controller webpage calls this <strong>Firmware Update</strong>. “Firmware” simply means the software stored inside the device. Worker updates are started from the V2 main controller; the worker has no upload page of its own.</p>
+    <ol class="steps">
+      <li>Charge the worker and place it near the main controller. Maintain stable power to both devices.</li>
+      <li>On the main controller, turn Auto Mode off and wait until the system is neither watering nor checking workers.</li>
+      <li>Open <strong>Firmware Update</strong>. Under <strong>Worker Firmware</strong>, upload the correct worker update file ending in <code>.ota</code>.</li>
+      <li>In the worker list on that page, select <strong>Update</strong> for this worker.</li>
+      <li>Wait through checking, connection, transfer, verification, reboot, and reconnect. Do not disconnect the battery.</li>
+      <li>Confirm that the main controller reports the new worker software version.</li>
+    </ol>
+    <p>The file must be for the correct worker model, must not be damaged, and must have an allowed software version. The installed version and versions below the allowed minimum are rejected.</p>
+  </section>
+
+  <section id="maintenance">
+    <h2>9. Maintenance</h2>
+    <ul>
+      <li>Inspect the battery regularly for swelling, heat damage, abrasion, or moisture.</li>
+      <li>Check every cable and connector for corrosion, looseness, crushed insulation, and strain.</li>
+      <li>Inspect tubing and valve bodies for leaks, deposits, blockage, and incorrect port routing.</li>
+      <li>Clean soil-sensor surfaces gently and recalibrate after moving a sensor, changing soil, repotting, or replacing a battery/sensor.</li>
+      <li>Compare delivered volume per channel periodically; tubing length and deposits can change flow.</li>
+      <li>Before storage, disconnect water, switch the worker off, and follow the battery supplier's lithium-polymer storage and temperature guidance.</li>
+    </ul>
+  </section>
+
+  <section id="troubleshooting">
+    <h2>10. Troubleshooting</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Symptom</th><th>Checks</th></tr></thead>
+      <tbody>
+        <tr><td>Worker does not appear on the main</td><td>Confirm battery/power, exact 12-character Bluetooth device ID, range, and that Auto Mode is off. Wait through at least one 30-second contact interval.</td></tr>
+        <tr><td>Worker was used with another main</td><td>Remove it from the old main, then leave it awake without old-main communication for about five minutes or completely power-cycle its battery before adding it to the new main.</td></tr>
+        <tr><td>Updates arrive only after a long delay</td><td>The worker may be in low-power sleep. Its wake time follows the main controller's <strong>Data sync interval</strong>. Turn Auto Mode off while checking the problem.</td></tr>
+        <tr><td>Sensor says Not Connected or is implausible</td><td>Power down, reseat the matching sensor connector, check orientation/cable damage, ensure exposed electronics are not buried, then compare against another known-good sensor.</td></tr>
+        <tr><td>Wrong plant is watered</td><td>Stop the pump. Use the connector-number photograph and verify that Sensor N, Valve N, displayed Pot N, and physical plant N all match.</td></tr>
+        <tr><td>Valve does not operate</td><td>Check worker sync, battery level, connector seating/polarity, correct 5 V valve, tubing direction, and configured duration. Test only with Auto Mode off and supervision.</td></tr>
+        <tr><td>Battery shows very low or worker shuts down</td><td>Stop valve tests, inspect the battery, and charge it through USB-C. Press the power button once to turn it on again.</td></tr>
+        <tr><td>Three-flash fault repeats</td><td>The clock part used for low-power timing is not starting correctly. Power down and have the worker inspected; normal sensor activity is two medium flashes, not this repeating three-flash sequence.</td></tr>
+        <tr><td>Software update fails</td><td>Charge the worker, move it closer, turn Auto Mode off, wait until the main controller is idle, and verify that the file is for the correct worker model and software version.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+</main>
+
+<footer>
+  <p>V2 8-Pot Worker development user manual · Behavior is based on the device software reviewed on 2026-08-17.</p>
+</footer>
+</body>
+</html>
